@@ -5,7 +5,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import bittorrent.Main;
+import bittorrent.BitTorrentApplication; // Changed from bittorrent.Main
 import bittorrent.util.NetworkUtils;
 import lombok.SneakyThrows;
 
@@ -16,7 +16,7 @@ public record AnnounceResponse(
 
 	@SneakyThrows
 	public static AnnounceResponse of(Map<String, Object> root, short selfPort) {
-		if (Main.DEBUG) {
+		if (BitTorrentApplication.DEBUG) { // Using constant from new application class
 			System.err.println("AnnounceResponse: %s".formatted(root));
 		}
 
