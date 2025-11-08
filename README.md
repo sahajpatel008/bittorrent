@@ -1,36 +1,123 @@
-[![progress-banner](https://backend.codecrafters.io/progress/bittorrent/328831ac-148f-4bbc-8d7f-65f40baddd38)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
+# BitTorrent Client in Java (Spring Boot API)
 
-This is a starting point for Java solutions to the
-["Build Your Own BitTorrent" Challenge](https://app.codecrafters.io/courses/bittorrent/overview).
+This project is a BitTorrent client implemented in Java. It was originally a command-line tool that has been refactored into a Spring Boot web application, exposing its core functionality as a REST API.
 
-In this challenge, you’ll build a BitTorrent client that's capable of parsing a
-.torrent file and downloading a file from a peer. Along the way, we’ll learn
-about how torrent files are structured, HTTP trackers, BitTorrent’s Peer
-Protocol, pipelining and more.
+The client can parse `.torrent` files and magnet links, communicate with trackers to find peers, and download complete files from those peers.
 
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
+## 🛠️ Tech Stack
 
-# Passing the first stage
+*   Java 21
+*   Spring Boot: Used to create the REST API and run the web server.
+*   Maven: For dependency management and building the project.
+*   OkHttp: As the HTTP client for tracker communication [cite: `TrackerClient.java`](src/main/java/bittorrent/tracker/TrackerClient.java).
+*   Gson: For JSON serialization in the API [cite: `BitTorrentService.java`](src/main/java/bittorrent/service/BitTorrentService.java).
 
-The entry point for your BitTorrent implementation is in
-`src/main/java/Main.java`. Study and uncomment the relevant code, and push your
-changes to pass the first stage:
+## 📂 Project Structure
 
-```sh
-git add .
-git commit -m "pass 1st stage" # any msg
-git push origin master
+Here is an overview of the key packages and files based on your project layout:
+
+```
+BITTORRENT-JAVA/
+├── pom.xml                 # Maven build configuration
+│
+├── src/main/java/
+│   └── bittorrent/
+│       ├── BitTorrentApplication.java  # Spring Boot entry point
+│       ├── Main.java                 # Deprecated CLI entry point
+│       │
+│       ├── controller/             # REST API definitions
+│       │   └── BitTorrentController.java
+│       │
+│       ├── service/                # Core business logic
+│       │   └── BitTorrentService.java
+│       │
+│       ├── bencode/                # Bencode (de)serializer classes
+│       ├── magnet/                 # Magnet link parser
+│       ├── peer/                   # Peer connection & wire protocol logic
+│       ├── torrent/                # Data models for .torrent files
+│       ├── tracker/                # Tracker HTTP client logic
+│       └── util/                   # SHA-1 and Network utilities
+│
+├── .gitignore              # Git ignore file
+├── sample.torrent          # Example torrent file for testing
+└── ... (other config files)
 ```
 
-Time to move on to the next stage!
+## ⚙️ How to Run (Development)
 
-# Stage 2 & beyond
+You must have Java (JDK 21+) and Maven installed.
 
-Note: This section is for stages 2 and beyond.
+All commands should be run from the project's root directory (where `pom.xml` is located).
 
-1. Ensure you have `java (1.8)` installed locally
-1. Run `./your_bittorrent.sh` to run your program, which is implemented in
-   `src/main/java/Main.java`.
-1. Commit your changes and run `git push origin master` to submit your solution
-   to CodeCrafters. Test output will be streamed to your terminal.
+This method uses the Spring Boot plugin to compile and run the application in one step. It's the fastest way to get the server running.
+
+```bash
+mvn spring-boot:run
+```
+
+Once running, the server will be available at `http://localhost:8080`.
+
+## 📖 API Endpoints
+
+You can interact with the running application using these endpoints [cite: `BitTorrentController.java`](src/main/java/bittorrent/controller/BitTorrentController.java).
+
+### GET /api/decode
+
+Decodes a Bencoded string and returns it as JSON.
+
+**Query Parameter**: `encoded` (string)
+
+**Example**:
+
+```bash
+curl "http://localhost:8080/api/decode?encoded=d3:bar4:spam3:fooi42ee"
+```
+
+**Response**:
+
+```json
+{"bar":"spam","foo":42}
+```
+
+### POST /api/info
+
+Parses a `.torrent` file and returns its metadata as a formatted string.
+
+**Body**: `multipart/form-data`
+
+**Form Key**: `file` (file)
+
+**Example**:
+
+```bash
+curl -X POST -F "file=@/path/to/sample.torrent" http://localhost:8080/api/info
+```
+
+**Response**:
+
+```
+Tracker URL: http://...
+Length: 123456
+Info Hash: ...
+Piece Length: ...
+Piece Hashes:
+...
+```
+
+### POST /api/download/piece/{pieceIndex}
+
+Downloads a specific piece from a `.torrent` file and returns the raw binary data.
+
+**Path Variable**: `pieceIndex` (int)
+
+**Body**: `multipart/form-data`
+
+**Form Key**: `file` (file)
+
+**Example**:
+
+```bash
+# Downloads piece 0 and saves it as 'piece_0.bin'
+curl -X POST -F "file=@/path/to/sample.torrent" \
+     http://localhost:8080/api/download/piece/0 \
+     --output piece_0.bin
