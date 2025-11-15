@@ -65,6 +65,7 @@ public class BitTorrentController {
 			@RequestParam String peer,
 			@RequestParam String file) throws IOException, InterruptedException {
 		
+			// TODO: Take the actual file from the GUI  (we take the actual file content)
 		// NOTE: In a real app, file content should be uploaded, not referenced by path
 		return bitTorrentService.handshake(file, peer);
 	}
@@ -88,6 +89,29 @@ public class BitTorrentController {
 				.header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"piece-%d.bin\"".formatted(pieceIndex))
 				.contentType(MediaType.APPLICATION_OCTET_STREAM)
 				.body(resource);
+		} catch (Exception e) {
+			e.printStackTrace();
+			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+		}
+	}
+
+	// Example: POST /api/download (with .torrent file upload)
+	@PostMapping("/api/download")
+	public ResponseEntity<Resource> downloadFile(@RequestParam("file") MultipartFile file) {
+		try {
+			final var tempTorrentFile = java.io.File.createTempFile("torrent-", ".torrent");
+			file.transferTo(tempTorrentFile);
+
+			final var downloadedFile = bitTorrentService.downloadFile(tempTorrentFile.getAbsolutePath());
+
+			tempTorrentFile.delete();
+
+			final var resource = new FileSystemResource(downloadedFile);
+
+			return ResponseEntity.ok()
+					.header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + downloadedFile.getName() + "\"")
+					.contentType(MediaType.APPLICATION_OCTET_STREAM)
+					.body(resource);
 		} catch (Exception e) {
 			e.printStackTrace();
 			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();

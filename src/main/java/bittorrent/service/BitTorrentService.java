@@ -105,6 +105,23 @@ public class BitTorrentService {
 			return tempFile; // Return file object for controller to handle
 		}
 	}
+
+	public File downloadFile(String path) throws IOException, InterruptedException {
+		final var torrent = load(path);
+		final var torrentInfo = torrent.info();
+
+		final var firstPeer = trackerClient.announce(torrent).peers().getFirst();
+		final var tempFile = new File(torrentInfo.name());
+
+		try (
+				final var peer = Peer.connect(firstPeer, torrent);
+				final var fileOutputStream = new FileOutputStream(tempFile);
+		) {
+			final var data = peer.downloadFile(torrentInfo);
+			fileOutputStream.write(data);
+			return tempFile;
+		}
+	}
 	
 	// Implementation for Magnet links and full download would follow similar patterns
 	// ... (Other command methods here) ...
