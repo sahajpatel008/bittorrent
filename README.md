@@ -122,3 +122,11 @@ Downloads a specific piece from a `.torrent` file and returns the raw binary dat
 curl -X POST -F "file=@/path/to/sample.torrent" \
      http://localhost:8080/api/download/piece/0 \
      --output piece_0.bin
+```
+Or you can also test with the actual torrent file:
+```bash
+curl -X POST -F "file=@big-buck-bunny.torrent" \
+     http://localhost:8080/api/download/piece/0 \
+     --output piece_0.bin
+```
+
