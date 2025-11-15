@@ -13,6 +13,7 @@ The client can parse `.torrent` files and magnet links, communicate with tracker
 *   Gson: For JSON serialization in the API [cite: `BitTorrentService.java`](src/main/java/bittorrent/service/BitTorrentService.java).
 
 ## 📂 Project Structure
+For more context (and for your beloved llms), refer [CONTEXT.md](CONTEXT.md)
 
 Here is an overview of the key packages and files based on your project layout:
 
