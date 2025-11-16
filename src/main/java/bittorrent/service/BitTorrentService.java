@@ -80,11 +80,13 @@ public class BitTorrentService {
 
 	public String handshake(String path, String peerIpAndPort) throws IOException, InterruptedException {
 		final var torrent = load(path);
+		// We need a File object. It can be a placeholder since we're just handshaking.
+		final var tempFile = new File(torrent.info().name());
 
 		final var parts = peerIpAndPort.split(":", 2);
 		final var socket = new Socket(parts[0], Integer.parseInt(parts[1]));
 
-		try (final var peer = Peer.connect(socket, torrent)) {
+		try (final var peer = Peer.connect(socket, torrent, torrent.info(), tempFile)) { 
 			return "Peer ID: %s".formatted(hexFormat.formatHex(peer.getId()));
 		}
 	}
@@ -96,8 +98,11 @@ public class BitTorrentService {
 		final var firstPeer = trackerClient.announce(torrent).peers().getFirst();
 		final var tempFile = File.createTempFile("piece-", ".bin");
 
+		// This is the (potentially empty) file we will read from for uploads
+		final var fullFile = new File(torrentInfo.name());
+
 		try (
-			final var peer = Peer.connect(firstPeer, torrent);
+			final var peer = Peer.connect(firstPeer, torrent, torrentInfo, fullFile);
 			final var fileOutputStream = new FileOutputStream(tempFile);
 		) {
 			final var data = peer.downloadPiece(torrentInfo, pieceIndex);
@@ -110,11 +115,12 @@ public class BitTorrentService {
 		final var torrent = load(path);
 		final var torrentInfo = torrent.info();
 
+		// TODO: later we need to add peer picking strategy
 		final var firstPeer = trackerClient.announce(torrent).peers().getFirst();
 		final var tempFile = new File(torrentInfo.name());
 
 		try (
-				final var peer = Peer.connect(firstPeer, torrent);
+				final var peer = Peer.connect(firstPeer, torrent, torrentInfo, tempFile);
 				final var fileOutputStream = new FileOutputStream(tempFile);
 		) {
 			final var data = peer.downloadFile(torrentInfo);

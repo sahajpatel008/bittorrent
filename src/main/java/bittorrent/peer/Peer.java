@@ -9,11 +9,19 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Deque;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
+import java.util.concurrent.BlockingDeque;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingDeque;
+import java.io.RandomAccessFile;
+import java.io.File;
+import java.io.FileNotFoundException;
 
+import bittorrent.BitTorrentApplication;
 import bittorrent.Main;
 import bittorrent.magnet.Magnet;
 import bittorrent.peer.protocol.Message;
@@ -21,6 +29,7 @@ import bittorrent.peer.protocol.MetadataMessage;
 import bittorrent.peer.serial.MessageDescriptor;
 import bittorrent.peer.serial.MessageDescriptors;
 import bittorrent.peer.serial.MessageSerialContext;
+import bittorrent.torrent.Torrent;
 import bittorrent.torrent.TorrentInfo;
 import bittorrent.tracker.Announceable;
 import bittorrent.util.DigestUtils;
@@ -43,14 +52,32 @@ public class Peer implements AutoCloseable {
 	private boolean interested;
 	private @Getter int metadataExtensionId = -1;
 
-	private List<Message> receiveQueue;
+	private Deque<Message> receiveQueue;
 
-	public Peer(byte[] id, Socket socket, boolean supportExtensions) {
+	// New fields for the reader thread and upload logic
+	private final TorrentInfo torrentInfo;
+	private final File downloadedFile;
+	private final Thread readerThread;
+	private final BlockingQueue<Message.Piece> pieceQueue = new LinkedBlockingDeque<>();
+
+	private volatile boolean peerInterested = false;
+	private volatile boolean amChoking = true; 
+
+	public Peer(byte[] id, Socket socket, boolean supportExtensions, TorrentInfo torrentInfo, File downloadedFile) {
 		this.id = id;
 		this.socket = socket;
 		this.supportExtensions = supportExtensions;
+		this.torrentInfo = torrentInfo; 
+		this.downloadedFile = downloadedFile; 
 
 		this.receiveQueue = new LinkedList<>();
+
+		// Start the reader thread
+		this.readerThread = new Thread(this::runReaderLoop);
+		this.readerThread.setName("PeerReader-" + socket.getRemoteSocketAddress());
+		this.readerThread.setDaemon(true);
+		this.readerThread.start();
+
 	}
 
 	private Message doReceive(MessageSerialContext context) throws IOException {
@@ -93,7 +120,7 @@ public class Peer implements AutoCloseable {
 	}
 
 	public Message waitFor(Predicate<Message> predicate, MessageSerialContext context) throws IOException {
-		final var iterator = receiveQueue.listIterator();
+		final var iterator = receiveQueue.iterator();
 		while (iterator.hasNext()) {
 			final var message = iterator.next();
 
@@ -146,7 +173,7 @@ public class Peer implements AutoCloseable {
 		dataOutputStream.write(byteArrayOutputStream.getBuffer(), 0, length - 1);
 	}
 
-	public void awaitBitfield() throws IOException {
+	public void awaitBitfield() throws IOException, InterruptedException {
 		if (bitfield) {
 			return;
 		}
@@ -161,7 +188,8 @@ public class Peer implements AutoCloseable {
 				),
 				METADATA_CONTEXT
 			);
-
+			
+			// This part should still work as handleMessage adds Extensions to receiveQueue
 			final var extension = waitFor(Message.Extension.class, METADATA_CONTEXT);
 			System.err.println("extension: %s".formatted(extension));
 
@@ -169,8 +197,21 @@ public class Peer implements AutoCloseable {
 			metadataExtensionId = metadata.extensionIds().get("ut_metadata");
 		}
 
-		waitFor(Message.Bitfield.class, null);
-		bitfield = true;
+		// waitFor(Message.Bitfield.class, null);
+		// NEW:  wait until the reader thread sets the bitfield flag
+		while(!bitfield){
+			// check receive queue for bitfield msg
+			var msg = receiveQueue.poll();
+			if(msg instanceof Message.Bitfield bf){
+				handleMessage(bf); // process it
+				break;
+			}
+			if(msg != null){
+				receiveQueue.addFirst(msg); // put it back
+			}
+
+			Thread.sleep(100); // Poll
+		}
 	}
 
 	public byte[] downloadPiece(TorrentInfo torrentInfo, int pieceIndex) throws IOException, InterruptedException {
@@ -214,16 +255,33 @@ public class Peer implements AutoCloseable {
 			));
 		}
 
+		int bytesDownloaded = 0;
 		for (var index = 0; index < blockCount; ++index) {
-			final var piece = waitFor(Message.Piece.class, null);
+			// final var piece = waitFor(Message.Piece.class, null);
+			final var piece = pieceQueue.take(); // blocks until a piece arrives from the reader thread
+
+			if(piece.index() != pieceIndex){
+				System.err.println("Received piece for wrong index. Discarding.");
+				index--; // decrement to re-wait for the correct piece.
+				continue;
+			}
 
 			System.arraycopy(piece.block(), 0, bytes, piece.begin(), piece.block().length);
+			bytesDownloaded += piece.block().length;
+		}
+
+		if(bytesDownloaded != realPieceLength){
+			throw new IOException("Downloaded piece length mismatch.");
 		}
 
 		final var downloadedPieceHash = DigestUtils.sha1(bytes);
 		if (!Arrays.equals(pieceHash, downloadedPieceHash)) {
 			throw new IllegalStateException("piece hash does not match");
 		}
+
+		// Send a HAVE message to this peer.
+		// This tells the peer you now have this piece and can upload it. 
+		send(new Message.Have(pieceIndex));
 
 		return bytes;
 	}
@@ -242,33 +300,29 @@ public class Peer implements AutoCloseable {
 			return;
 		}
 
-		while (true) {
-			send(new Message.Interested());
+		send(new Message.Interested());
+		this.interested = true;
 
-			final var choke = waitFor((message) -> message instanceof Message.Unchoke || message instanceof Message.Choke, null);
-			if (choke instanceof Message.Unchoke) {
-				interested = true;
-				break;
-			}
-
-			System.err.println("peer is chocked");
-			Thread.sleep(Duration.ofSeconds(1));
-		}
+		// old logic of blocked until unchoked is removed. 
+		// a more advanced client would wait for an unchoke message.
+		// (received by the reader loop) before sending 'Request' messages.
 	}
 
 	@Override
 	public void close() throws IOException, InterruptedException {
+		readerThread.interrupt(); // Stop the reader thread
 		socket.close();
+		readerThread.join(2000); // wait for thread to die.
 	}
 
-	public static Peer connect(InetSocketAddress address, Announceable announceable) throws IOException {
+	public static Peer connect(InetSocketAddress address, Announceable announceable, TorrentInfo torrentInfo, File file) throws IOException {
 		System.err.println("peer: trying to connect: %s".formatted(address));
 
 		final var socket = new Socket(address.getAddress(), address.getPort());
-		return connect(socket, announceable);
+		return connect(socket, announceable, torrentInfo, file); // Pass new args
 	}
 
-	public static Peer connect(Socket socket, Announceable announceable) throws IOException {
+	public static Peer connect(Socket socket, Announceable announceable, TorrentInfo torrentInfo, File file) throws IOException {
 		final var infoHash = announceable.getInfoHash();
 		final var padding = announceable instanceof Magnet ? PADDING_MAGNET_8 : PADDING_8;
 
@@ -317,7 +371,7 @@ public class Peer implements AutoCloseable {
 				}
 
 				final var peerId = inputStream.readNBytes(20);
-				return new Peer(peerId, socket, supportExtensions);
+				return new Peer(peerId, socket, supportExtensions, torrentInfo, file);
 			}
 		} catch (Exception exception) {
 			socket.close();
@@ -351,4 +405,141 @@ public class Peer implements AutoCloseable {
 		return data.torrentInfo();
 	}
 
+	private void runReaderLoop() {
+		try {
+			final var dataInputStream = new DataInputStream(socket.getInputStream());
+			
+			while (!socket.isClosed() && !Thread.currentThread().isInterrupted()) {
+				// 1. Read message length
+				final int length;
+				try {
+					length = dataInputStream.readInt();
+				} catch (EOFException exception) {
+					throw new PeerClosedException(exception);
+				}
+	
+				// 2. Read type and deserialize
+				final var typeId = length != 0 ? dataInputStream.readByte() : (byte) -1;
+				final var descriptor = MessageDescriptors.getByTypeId(typeId);
+
+				MessageSerialContext context = null;
+				if (descriptor.typeId() == MessageDescriptors.EXTENSION.typeId()) {
+						context = METADATA_CONTEXT;
+				}
+				
+				final var message = descriptor.deserialize(length - 1, dataInputStream, context);
+				
+				if (BitTorrentApplication.DEBUG) {
+					System.err.println("RECV_LOOP: %s".formatted(message));
+				}
+				
+				// 3. Handle KeepAlive directly
+				if (message instanceof Message.KeepAlive) {
+					send(new Message.KeepAlive()); // Respond immediately
+					continue;
+				}
+
+				// 4. Pass to message handler
+				handleMessage(message);
+			}
+		} catch (EOFException | PeerClosedException e) {
+			if (BitTorrentApplication.DEBUG) {
+				System.err.println("Peer connection closed: " + socket.getRemoteSocketAddress());
+			}
+		} catch (IOException e) {
+			if (!socket.isClosed()) {
+				System.err.println("Error in peer reader loop: " + e.getMessage());
+			}
+		} finally {
+			closeQuietly();
+		}
+	}
+
+	private void handleMessage(Message message) throws IOException {
+		if (message instanceof Message.Piece piece) {
+			// This is for our download. Add it to the queue.
+			pieceQueue.add(piece);
+		} else if (message instanceof Message.Interested) {
+			// The peer is interested in us.
+			this.peerInterested = true;
+			// If we are choking them, unchoke them so they can request.
+			if (this.amChoking) {
+				send(new Message.Unchoke());
+				this.amChoking = false;
+			}
+		} else if (message instanceof Message.NotInterested) {
+			// The peer is not interested.
+			this.peerInterested = false;
+		} else if (message instanceof Message.Request request) {
+			// The peer is requesting a block. This is our upload logic.
+			handlePieceRequest(request);
+		} else if (message instanceof Message.Bitfield) {
+			// This is for our download. Store it.
+			this.bitfield = true; 
+			receiveQueue.add(message); // Also add to queue for awaitBitfield()
+		} else if (message instanceof Message.Extension) {
+			receiveQueue.add(message); // Add to queue for awaitBitfield()
+		}
+		// You can add handlers for Choke, Unchoke, Have, Cancel here
+	}
+
+	private void handlePieceRequest(Message.Request request) throws IOException {
+		if (!peerInterested) {
+			if (BitTorrentApplication.DEBUG) {
+				System.err.println("Got request from uninterested peer. Ignoring.");
+			}
+			return; 
+		}
+		if (amChoking) {
+			if (BitTorrentApplication.DEBUG) {
+				System.err.println("Got request from choked peer. Ignoring.");
+			}
+			return;
+		}
+		
+		// IMPORTANT: A full client would check its bitfield to see if it *has* this piece.
+		// For now, we'll just try to read from the file.
+		
+		try (RandomAccessFile raf = new RandomAccessFile(this.downloadedFile, "r")) {
+			long pieceStart = (long)request.index() * this.torrentInfo.pieceLength();
+			long blockStart = pieceStart + request.begin();
+			
+			if (request.length() > 16384) { // 2^14 bytes
+					System.err.println("Request length too large. Ignoring.");
+					return;
+			}
+
+			byte[] block = new byte[request.length()];
+			raf.seek(blockStart);
+			int bytesRead = raf.read(block);
+
+			if (bytesRead != request.length()) {
+				System.err.println("Could not read full block from file. Ignoring request.");
+				return;
+			}
+			
+			// Send the requested piece
+			send(new Message.Piece(request.index(), request.begin(), block));
+			
+		} catch (FileNotFoundException e) {
+			// This will happen if we don't have the file/piece yet.
+			if (BitTorrentApplication.DEBUG) {
+				System.err.println("Cannot read from file to upload, file not found or piece not downloaded.");
+			}
+		} catch (IOException e) {
+			System.err.println("Error reading from file for upload: " + e.getMessage());
+		}
+	}
+
+	private void closeQuietly() {
+		try {
+			if (socket != null && !socket.isClosed()) {
+				socket.close();
+			}
+		} catch (IOException e) {
+			// Ignore
+		}
+	}
+	
+	
 }
