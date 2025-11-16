@@ -130,3 +130,20 @@ curl -X POST -F "file=@big-buck-bunny.torrent" \
      --output piece_0.bin
 ```
 
+
+### POST /api/download
+
+Downloads a complete file from a `.torrent` file.
+
+**Body**: `multipart/form-data`
+
+**Form Key**: `file` (file)
+
+**Example**:
+
+```bash
+# Downloads the file specified in 'sample.torrent'
+curl -X POST -F "file=@/path/to/sample.torrent" \
+     http://localhost:8080/api/download \
+     --output downloaded_file_name.ext
+```
