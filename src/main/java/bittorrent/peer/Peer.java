@@ -394,7 +394,7 @@ public class Peer implements AutoCloseable {
 		).content();
 	}
 
-	public TorrentInfo queryTorrentInfoViaMetadataExtension() throws IOException {
+	public TorrentInfo queryTorrentInfoViaMetadataExtension() throws IOException, InterruptedException {
 		awaitBitfield();
 
 		final var response = sendMetadata(new MetadataMessage.Request(0));
