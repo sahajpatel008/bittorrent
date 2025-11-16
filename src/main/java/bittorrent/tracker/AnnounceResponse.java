@@ -1,6 +1,9 @@
 package bittorrent.tracker;
 
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -25,15 +28,36 @@ public record AnnounceResponse(
 			interval = (long) root.get("mininterval");
 		}
 
-		final var peers = new ArrayList<InetSocketAddress>();
-		peers.addAll(NetworkUtils.parseV4SocketAddresses((String) root.get("peers")));
-		peers.addAll(NetworkUtils.parseV6SocketAddresses((String) root.get("peers6")));
+		final var peersList = new ArrayList<InetSocketAddress>();
+		final var peersValue = root.get("peers");
 
-		// peers.removeIf((x) -> x.getPort() == selfPort);
-		// peers.removeIf((x) -> x.getAddress() instanceof Inet4Address);
-		System.out.println(peers);
+		if (peersValue instanceof String compactPeers) {
+			peersList.addAll(NetworkUtils.parseV4SocketAddresses(compactPeers));
+		} else if (peersValue instanceof List<?> dictionaryPeers) {
+			for (Object peerObject : dictionaryPeers) {
+				if (peerObject instanceof Map<?, ?> peerMap) {
+					final var ip = (String) peerMap.get("ip");
+					final var port = ((Number) peerMap.get("port")).intValue();
+					try {
+						peersList.add(new InetSocketAddress(InetAddress.getByName(ip), port));
+					} catch (UnknownHostException e) {
+						// Ignore invalid peers
+						System.err.println("Invalid peer address: " + ip + ":" + port);
+					}
+				}
+			}
+		}
 
-		return new AnnounceResponse(interval, peers);
+		final var peers6Value = root.get("peers6");
+		if (peers6Value instanceof String compactPeers6) {
+			peersList.addAll(NetworkUtils.parseV6SocketAddresses(compactPeers6));
+		}
+
+		// peersList.removeIf((x) -> x.getPort() == selfPort);
+		// peersList.removeIf((x) -> x.getAddress() instanceof Inet4Address);
+		System.out.println(peersList);
+
+		return new AnnounceResponse(interval, peersList);
 	}
 
 }

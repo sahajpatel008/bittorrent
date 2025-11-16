@@ -228,6 +228,15 @@ public class Peer implements AutoCloseable {
 		return bytes;
 	}
 
+	public byte[] downloadFile(TorrentInfo torrentInfo) throws IOException, InterruptedException {
+		final var fileBytes = new ExposedByteArrayOutputStream((int) torrentInfo.length());
+		for (var i = 0; i < torrentInfo.pieces().size(); ++i) {
+			final var pieceBytes = downloadPiece(torrentInfo, i);
+			fileBytes.write(pieceBytes);
+		}
+		return fileBytes.getBuffer();
+	}
+
 	public void sendInterested() throws IOException, InterruptedException {
 		if (interested) {
 			return;

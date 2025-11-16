@@ -16,11 +16,12 @@ public class TrackerClient {
 	@SuppressWarnings("unchecked")
 	public AnnounceResponse announce(Announceable announceable) throws IOException {
 		final var selfPort = (short) 6881;
-
+		final var trackerUrl = announceable.getTrackerUrl();
+		System.out.println("Attempting to pass tracker url : " + trackerUrl);
 		final var request = new Request.Builder()
 			.get()
 			.url(
-				HttpUrl.parse(announceable.getTrackerUrl())
+				HttpUrl.parse(trackerUrl)
 					.newBuilder()
 					.addEncodedQueryParameter("info_hash", DigestUtils.urlEncode(announceable.getInfoHash()))
 					.addQueryParameter("peer_id", "00112233445566778899")
