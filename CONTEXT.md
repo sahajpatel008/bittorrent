@@ -252,13 +252,17 @@ curl -X POST -F "file=@sample.torrent" http://localhost:8080/api/download/piece/
 
 ## Missing Implementations (TODOs)
 
-1. **Full file download**: Currently only downloads single pieces. Need to loop through all pieces and assemble.
-2. **Multi-peer downloads**: Only uses first peer. Should parallelize across multiple peers.
-3. **Upload support**: Client can download but doesn't seed (upload to others).
-4. **Peer selection**: No smart peer selection (fastest, closest, etc.).
-5. **Resume capability**: No state persistence for partial downloads.
-6. **GET /api/peers endpoint**: Service method exists but no controller endpoint.
+1.  **Upload Correctness (Bitfield Check)**: The new upload logic in `handlePieceRequest()` doesn't verify if the client *actually has* a piece before sending it. A client-side bitfield (like a `BitSet`) must be implemented to track downloaded pieces, and this bitfield must be checked before uploading a block. This is the **top priority** to prevent sending bad data.
 
+2.  **Persistent Seeding**: The client's `Peer` connections are wrapped in `try-with-resources` blocks (as seen in the `BitTorrentService` methods), meaning they close immediately after the download finishes. This should be refactored to keep connections open and continue seeding (uploading) after the file is 100% complete.
+
+3.  **Multi-peer downloads**: Only uses first peer. Should parallelize across multiple peers.
+
+4.  **Peer selection**: No smart peer selection (fastest, closest, etc.).
+
+5.  **Resume capability**: No state persistence for partial downloads.
+
+6.  **GET /api/peers endpoint**: Service method exists but no controller endpoint.
 ---
 
 ## Important Notes
