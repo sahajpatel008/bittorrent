@@ -7,14 +7,12 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Deque;
 import java.util.LinkedList;
-import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
-import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.io.RandomAccessFile;
@@ -29,7 +27,6 @@ import bittorrent.peer.protocol.MetadataMessage;
 import bittorrent.peer.serial.MessageDescriptor;
 import bittorrent.peer.serial.MessageDescriptors;
 import bittorrent.peer.serial.MessageSerialContext;
-import bittorrent.torrent.Torrent;
 import bittorrent.torrent.TorrentInfo;
 import bittorrent.tracker.Announceable;
 import bittorrent.util.DigestUtils;
@@ -61,7 +58,10 @@ public class Peer implements AutoCloseable {
 	private final BlockingQueue<Message.Piece> pieceQueue = new LinkedBlockingDeque<>();
 
 	private volatile boolean peerInterested = false;
-	private volatile boolean amChoking = true; 
+	private volatile boolean amChoking = true;
+
+	// Client-side bitfield to track which pieces we have downloaded and verified
+	private final BitSet clientBitfield; 
 
 	public Peer(byte[] id, Socket socket, boolean supportExtensions, TorrentInfo torrentInfo, File downloadedFile) {
 		this.id = id;
@@ -71,6 +71,9 @@ public class Peer implements AutoCloseable {
 		this.downloadedFile = downloadedFile; 
 
 		this.receiveQueue = new LinkedList<>();
+
+		// Initialize bitfield with the number of pieces in the torrent
+		this.clientBitfield = new BitSet(torrentInfo.pieces().size());
 
 		// Start the reader thread
 		this.readerThread = new Thread(this::runReaderLoop);
@@ -212,6 +215,36 @@ public class Peer implements AutoCloseable {
 
 			Thread.sleep(100); // Poll
 		}
+
+		// Send our bitfield to the peer to let them know what pieces we have
+		sendOurBitfield();
+	}
+
+	/**
+	 * Sends our bitfield to the peer, indicating which pieces we have.
+	 * Only sends if we have at least one piece.
+	 */
+	private void sendOurBitfield() throws IOException {
+		// Only send bitfield if we have at least one piece
+		if (clientBitfield.isEmpty()) {
+			return;
+		}
+
+		// Convert BitSet to byte array for the wire protocol
+		// BitTorrent bitfield: each bit represents a piece (1 = have, 0 = don't have)
+		int numPieces = torrentInfo.pieces().size();
+		int numBytes = (numPieces + 7) / 8; // Round up to nearest byte
+		byte[] bitfieldBytes = new byte[numBytes];
+
+		for (int i = 0; i < numPieces; i++) {
+			if (clientBitfield.get(i)) {
+				int byteIndex = i / 8;
+				int bitIndex = 7 - (i % 8); // MSB first
+				bitfieldBytes[byteIndex] |= (1 << bitIndex);
+			}
+		}
+
+		send(new Message.Bitfield(bitfieldBytes));
 	}
 
 	public byte[] downloadPiece(TorrentInfo torrentInfo, int pieceIndex) throws IOException, InterruptedException {
@@ -278,6 +311,9 @@ public class Peer implements AutoCloseable {
 		if (!Arrays.equals(pieceHash, downloadedPieceHash)) {
 			throw new IllegalStateException("piece hash does not match");
 		}
+
+		// Mark this piece as downloaded and verified in our bitfield
+		clientBitfield.set(pieceIndex);
 
 		// Send a HAVE message to this peer.
 		// This tells the peer you now have this piece and can upload it. 
@@ -497,8 +533,13 @@ public class Peer implements AutoCloseable {
 			return;
 		}
 		
-		// IMPORTANT: A full client would check its bitfield to see if it *has* this piece.
-		// For now, we'll just try to read from the file.
+		// Check if we actually have this piece before attempting to upload
+		if (!clientBitfield.get(request.index())) {
+			if (BitTorrentApplication.DEBUG) {
+				System.err.println("Got request for piece %d that we don't have. Ignoring.".formatted(request.index()));
+			}
+			return;
+		}
 		
 		try (RandomAccessFile raf = new RandomAccessFile(this.downloadedFile, "r")) {
 			long pieceStart = (long)request.index() * this.torrentInfo.pieceLength();

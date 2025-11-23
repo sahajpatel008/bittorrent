@@ -44,6 +44,12 @@ BITTORRENT-JAVA/
 └── ... (other config files)
 ```
 
+## ⚠️ Current Limitations
+
+*   **Single File Mode Only**: This client currently supports only single-file torrents. It assumes the `.torrent` metadata describes a single file structure. Multi-file torrents (containing a `files` list in the info dictionary) are not yet supported and may cause the download to fail or behave unexpectedly.
+*   **No Persistent Seeding**: Connections are currently closed immediately after a download completes.
+*   **Single Peer Download**: Downloads are performed sequentially from a single peer rather than in parallel from the swarm.
+
 ## ⚙️ How to Run (Development)
 
 You must have Java (JDK 21+) and Maven installed.

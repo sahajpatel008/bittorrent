@@ -137,6 +137,8 @@ peer.downloadPiece(torrentInfo, pieceIndex)
 
 **Choke/Unchoke**: Flow control mechanism. Peers "choke" to limit upload bandwidth. Must wait for "unchoke" before downloading.
 
+**Client Bitfield Tracking**: The client maintains a `BitSet` to track which pieces have been successfully downloaded and verified. After each piece's SHA-1 hash is verified in `downloadPiece()`, the corresponding bit is set. Before uploading a piece in `handlePieceRequest()`, the client checks this bitfield to ensure it actually has the requested piece. The client also sends its bitfield to peers after the handshake completes, allowing peers to know which pieces are available for download.
+
 ### 4. **BitTorrentService** (`service/`)
 **Purpose**: Orchestrate operations, called by REST controllers
 
@@ -252,17 +254,17 @@ curl -X POST -F "file=@sample.torrent" http://localhost:8080/api/download/piece/
 
 ## Missing Implementations (TODOs)
 
-1.  **Upload Correctness (Bitfield Check)**: The new upload logic in `handlePieceRequest()` doesn't verify if the client *actually has* a piece before sending it. A client-side bitfield (like a `BitSet`) must be implemented to track downloaded pieces, and this bitfield must be checked before uploading a block. This is the **top priority** to prevent sending bad data.
+1.  **Persistent Seeding**: The client's `Peer` connections are wrapped in `try-with-resources` blocks (as seen in the `BitTorrentService` methods), meaning they close immediately after the download finishes. This should be refactored to keep connections open and continue seeding (uploading) after the file is 100% complete.
 
-2.  **Persistent Seeding**: The client's `Peer` connections are wrapped in `try-with-resources` blocks (as seen in the `BitTorrentService` methods), meaning they close immediately after the download finishes. This should be refactored to keep connections open and continue seeding (uploading) after the file is 100% complete.
+2.  **Multi-peer downloads**: Only uses first peer. Should parallelize across multiple peers.
 
-3.  **Multi-peer downloads**: Only uses first peer. Should parallelize across multiple peers.
+3.  **Peer selection**: No smart peer selection (fastest, closest, etc.).
 
-4.  **Peer selection**: No smart peer selection (fastest, closest, etc.).
+4.  **Resume capability**: No state persistence for partial downloads.
 
-5.  **Resume capability**: No state persistence for partial downloads.
+5.  **GET /api/peers endpoint**: Service method exists but no controller endpoint.
 
-6.  **GET /api/peers endpoint**: Service method exists but no controller endpoint.
+6.  **Inbound Connection Listener**: The client doesn't listen on a `ServerSocket` for incoming connections from other peers. This is required for true seeding and to act as a full peer in the swarm.
 ---
 
 ## Important Notes
