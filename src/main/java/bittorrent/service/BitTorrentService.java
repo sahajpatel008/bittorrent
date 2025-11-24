@@ -16,6 +16,7 @@ import com.google.gson.Gson;
 
 import bittorrent.BitTorrentApplication;
 import bittorrent.bencode.BencodeDeserializer;
+import bittorrent.config.BitTorrentConfig;
 import bittorrent.magnet.Magnet;
 import bittorrent.peer.Peer;
 import bittorrent.peer.PeerServer;
@@ -34,9 +35,11 @@ public class BitTorrentService {
 	private final Gson gson = new Gson();
 	private final HexFormat hexFormat = BitTorrentApplication.HEX_FORMAT;
 	private final PeerServer peerServer;
+	private final BitTorrentConfig config;
 
-	public BitTorrentService(PeerServer peerServer) {
+	public BitTorrentService(PeerServer peerServer, BitTorrentConfig config) {
 		this.peerServer = peerServer;
+		this.config = config;
 	}
 
 	@PostConstruct
@@ -111,7 +114,7 @@ public class BitTorrentService {
 		final var parts = peerIpAndPort.split(":", 2);
 		final var socket = new Socket(parts[0], Integer.parseInt(parts[1]));
 
-		try (final var peer = Peer.connect(socket, torrent, torrent.info(), tempFile)) { 
+		try (final var peer = Peer.connect(socket, torrent, torrent.info(), tempFile, config.getPeerId())) { 
 			return "Peer ID: %s".formatted(hexFormat.formatHex(peer.getId()));
 		}
 	}
@@ -128,7 +131,7 @@ public class BitTorrentService {
 		final var tempFile = File.createTempFile("piece-", ".bin");
 
 		try (
-			final var peer = Peer.connect(firstPeer, torrent, torrentInfo, fullFile);
+			final var peer = Peer.connect(firstPeer, torrent, torrentInfo, fullFile, config.getPeerId());
 			final var fileOutputStream = new FileOutputStream(tempFile);
 		) {
 			final var data = peer.downloadPiece(torrentInfo, pieceIndex);
@@ -149,7 +152,7 @@ public class BitTorrentService {
 		final var firstPeer = trackerClient.announce(torrent).peers().getFirst();
 
 		try (
-				final var peer = Peer.connect(firstPeer, torrent, torrentInfo, tempFile);
+				final var peer = Peer.connect(firstPeer, torrent, torrentInfo, tempFile, config.getPeerId());
 				final var fileOutputStream = new FileOutputStream(tempFile);
 		) {
 			final var data = peer.downloadFile(torrentInfo);

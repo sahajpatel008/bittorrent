@@ -56,6 +56,22 @@ BITTORRENT-JAVA/
 *   **Client Bitfield Tracking**: The client maintains a `BitSet` to track which pieces have been successfully downloaded and verified, preventing upload of invalid data.
 *   **Debug Status Endpoint**: A new REST endpoint (`GET /api/debug/status`) allows you to check if the client is seeding a particular torrent.
 
+## ⚙️ Configuration
+
+The client can be configured via `src/main/resources/application.properties`. Key settings include:
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `bittorrent.peer-id` | `42112233445566778899` | Your client's 20-character peer ID |
+| `bittorrent.listen-port` | `6881` | Port for incoming peer connections |
+| `bittorrent.download-dir` | `./downloads` | Directory for downloaded files |
+| `bittorrent.max-connections` | `50` | Maximum simultaneous peer connections |
+| `bittorrent.max-upload-rate` | `-1` | Upload rate limit in bytes/sec (-1 = unlimited) |
+| `bittorrent.max-download-rate` | `-1` | Download rate limit in bytes/sec (-1 = unlimited) |
+| `server.port` | `8080` | HTTP API server port |
+
+See `.env.example` for a complete list of configuration options.
+
 ## ⚙️ How to Run (Development)
 
 You must have Java (JDK 21+) and Maven installed.

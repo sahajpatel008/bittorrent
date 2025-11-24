@@ -17,15 +17,16 @@ import org.springframework.stereotype.Component;
 
 import bittorrent.BitTorrentApplication;
 import bittorrent.Main;
+import bittorrent.config.BitTorrentConfig;
 import bittorrent.torrent.TorrentInfo;
 
 @Component
 public class PeerServer {
 
-    private static final int PORT = 6881;
     private static final byte[] PROTOCOL_BYTES = "BitTorrent protocol".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] PADDING_8 = new byte[8];
 
+    private final BitTorrentConfig config;
     private final ExecutorService executorService = Executors.newCachedThreadPool();
     private final Map<String, TorrentInfo> activeTorrents = new ConcurrentHashMap<>();
     private final Map<String, File> torrentFiles = new ConcurrentHashMap<>();
@@ -33,15 +34,19 @@ public class PeerServer {
     private ServerSocket serverSocket;
     private boolean running = false;
 
+    public PeerServer(BitTorrentConfig config) {
+        this.config = config;
+    }
+
     public void start() {
         if (running) {
             return;
         }
         
         try {
-            serverSocket = new ServerSocket(PORT);
+            serverSocket = new ServerSocket(config.getListenPort());
             running = true;
-            System.out.println("PeerServer listening on port " + PORT);
+            System.out.println("PeerServer listening on port " + config.getListenPort());
             
             Thread acceptThread = new Thread(this::acceptLoop);
             acceptThread.setName("PeerServer-Accept");
@@ -131,7 +136,7 @@ public class PeerServer {
             outputStream.write(PROTOCOL_BYTES);
             outputStream.write(PADDING_8); // We can support extensions later if needed
             outputStream.write(infoHash);
-            outputStream.write("42112233445566778899".getBytes(StandardCharsets.US_ASCII)); // Our Peer ID
+            outputStream.write(config.getPeerId().getBytes(StandardCharsets.US_ASCII)); // Our Peer ID
 
             // 3. Create Peer instance to handle the connection
             File file = torrentFiles.get(infoHashHex);

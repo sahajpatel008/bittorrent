@@ -354,14 +354,14 @@ public class Peer implements AutoCloseable {
 		readerThread.join(2000); // wait for thread to die.
 	}
 
-	public static Peer connect(InetSocketAddress address, Announceable announceable, TorrentInfo torrentInfo, File file) throws IOException {
+	public static Peer connect(InetSocketAddress address, Announceable announceable, TorrentInfo torrentInfo, File file, String peerId) throws IOException {
 		System.err.println("peer: trying to connect: %s".formatted(address));
 
 		final var socket = new Socket(address.getAddress(), address.getPort());
-		return connect(socket, announceable, torrentInfo, file); // Pass new args
+		return connect(socket, announceable, torrentInfo, file, peerId);
 	}
 
-	public static Peer connect(Socket socket, Announceable announceable, TorrentInfo torrentInfo, File file) throws IOException {
+	public static Peer connect(Socket socket, Announceable announceable, TorrentInfo torrentInfo, File file, String peerId) throws IOException {
 		final var infoHash = announceable.getInfoHash();
 		final var padding = announceable instanceof Magnet ? PADDING_MAGNET_8 : PADDING_8;
 
@@ -383,7 +383,7 @@ public class Peer implements AutoCloseable {
 				outputStream.write(announceable.getInfoHash());
 
 				/* peer id */
-				outputStream.write("42112233445566778899".getBytes(StandardCharsets.US_ASCII));
+				outputStream.write(peerId.getBytes(StandardCharsets.US_ASCII));
 			}
 
 			{
@@ -408,9 +408,9 @@ public class Peer implements AutoCloseable {
 				if (!Arrays.equals(receivedInfoHash, infoHash)) {
 					throw new IllegalStateException("invalid info hash: " + Arrays.toString(infoHash));
 				}
-
-				final var peerId = inputStream.readNBytes(20);
-				return new Peer(peerId, socket, supportExtensions, torrentInfo, file);
+	
+				final var receivedPeerId = inputStream.readNBytes(20);
+				return new Peer(receivedPeerId, socket, supportExtensions, torrentInfo, file);
 			}
 		} catch (Exception exception) {
 			socket.close();
