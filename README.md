@@ -47,8 +47,30 @@ BITTORRENT-JAVA/
 ## ⚠️ Current Limitations
 
 *   **Single File Mode Only**: This client currently supports only single-file torrents. It assumes the `.torrent` metadata describes a single file structure. Multi-file torrents (containing a `files` list in the info dictionary) are not yet supported and may cause the download to fail or behave unexpectedly.
-*   **No Persistent Seeding**: Connections are currently closed immediately after a download completes.
 *   **Single Peer Download**: Downloads are performed sequentially from a single peer rather than in parallel from the swarm.
+*   **Seeding Lifetime**: The client will seed downloaded files only while the Spring Boot application is running. There is no persistent state management across restarts.
+
+## ✅ New Features
+
+*   **Inbound Peer Connections**: The client now runs a `PeerServer` that listens on port `6881` for incoming connections from other peers, enabling true seeding after downloads complete.
+*   **Client Bitfield Tracking**: The client maintains a `BitSet` to track which pieces have been successfully downloaded and verified, preventing upload of invalid data.
+*   **Debug Status Endpoint**: A new REST endpoint (`GET /api/debug/status`) allows you to check if the client is seeding a particular torrent.
+
+## ⚙️ Configuration
+
+The client can be configured via `src/main/resources/application.properties`. Key settings include:
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `bittorrent.peer-id` | `42112233445566778899` | Your client's 20-character peer ID |
+| `bittorrent.listen-port` | `6881` | Port for incoming peer connections |
+| `bittorrent.download-dir` | `./downloads` | Directory for downloaded files |
+| `bittorrent.max-connections` | `50` | Maximum simultaneous peer connections |
+| `bittorrent.max-upload-rate` | `-1` | Upload rate limit in bytes/sec (-1 = unlimited) |
+| `bittorrent.max-download-rate` | `-1` | Download rate limit in bytes/sec (-1 = unlimited) |
+| `server.port` | `8080` | HTTP API server port |
+
+See `.env.example` for a complete list of configuration options.
 
 ## ⚙️ How to Run (Development)
 
@@ -153,3 +175,30 @@ curl -X POST -F "file=@/path/to/sample.torrent" \
      http://localhost:8080/api/download \
      --output downloaded_file_name.ext
 ```
+
+### GET /api/debug/status
+
+Checks the seeding status for a torrent file.
+
+**Query Parameter**: `path` (string) - absolute path to the `.torrent` file
+
+**Example**:
+
+```bash
+# Check if seeding sample.torrent
+curl "http://localhost:8080/api/debug/status?path=/path/to/sample.torrent"
+```
+
+**Response** (if seeding):
+
+```
+Seeding: Yes | InfoHash: <info_hash_hex>
+```
+
+**Response** (if not seeding):
+
+```
+Seeding: No (Torrent not registered)
+```
+
+**Note**: After downloading a file with `/api/download` or `/api/download/piece/{pieceIndex}`, the client automatically registers the torrent for seeding and other peers can connect to download from you on port `6881`.

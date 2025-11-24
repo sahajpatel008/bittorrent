@@ -28,6 +28,8 @@ bittorrent/
 ├── torrent/             Data models (Torrent, TorrentInfo)
 ├── tracker/             Tracker communication (get peer list)
 ├── peer/                Peer protocol implementation (download pieces)
+│   ├── Peer.java            Connection to other peer (outbound/inbound)
+│   └── PeerServer.java      Listens for incoming peer connections (port 6881)
 ├── bencode/             Bencode serialization/deserialization
 ├── magnet/              Magnet link support
 └── util/                SHA-1 hashing, network utilities
@@ -139,7 +141,47 @@ peer.downloadPiece(torrentInfo, pieceIndex)
 
 **Client Bitfield Tracking**: The client maintains a `BitSet` to track which pieces have been successfully downloaded and verified. After each piece's SHA-1 hash is verified in `downloadPiece()`, the corresponding bit is set. Before uploading a piece in `handlePieceRequest()`, the client checks this bitfield to ensure it actually has the requested piece. The client also sends its bitfield to peers after the handshake completes, allowing peers to know which pieces are available for download.
 
-### 4. **BitTorrentService** (`service/`)
+### 4. **PeerServer** (`peer/`)
+**Purpose**: Listen for inbound peer connections and handle seeding
+
+**Architecture**:
+```java
+PeerServer: {
+  port: 6881                     // Standard BitTorrent port
+  activeTorrents: ConcurrentHashMap<String, TorrentInfo>  // InfoHash -> TorrentInfo
+  torrentFiles: ConcurrentHashMap<String, File>          // InfoHash -> File
+  executorService: ExecutorService  // Thread pool for peer connections
+}
+```
+
+**Flow**:
+```
+1. Spring Boot app starts → @PostConstruct calls peerServer.start()
+2. ServerSocket listens on port 6881 in background thread
+3. When download completes → registerTorrent(torrentInfo, file)
+4. Other peers connect → acceptLoop() accepts socket
+5. handleConnection():
+   a. Read handshake from connecting peer
+   b. Verify info_hash against activeTorrents
+   c. Send handshake response with our peer_id
+   d. Create Peer instance to handle bidirectional communication
+   e. Send our bitfield immediately
+6. Peer instance handles upload requests via handlePieceRequest()
+```
+
+**Key Methods**:
+- `start()`: Creates ServerSocket on port 6881, starts accept loop thread
+- `registerTorrent(TorrentInfo, File)`: Makes torrent available for seeding
+- `getTorrentStatus(byte[] infoHash)`: Check if seeding a torrent (for debug endpoint)
+- `handleConnection(Socket)`: Perform handshake, create Peer instance
+- `stop()`: Shutdown server and thread pool (@PreDestroy)
+
+**Integration**:
+- `BitTorrentService` injects `PeerServer` as Spring dependency
+- After `downloadPiece()` or `downloadFile()`, service calls `peerServer.registerTorrent()`
+- Lifecycle managed by Spring: starts on app startup, stops on shutdown
+
+### 5. **BitTorrentService** (`service/`)
 **Purpose**: Orchestrate operations, called by REST controllers
 
 **Key methods**:
@@ -147,7 +189,14 @@ peer.downloadPiece(torrentInfo, pieceIndex)
 - `getInfo(String)`: Parse .torrent file
 - `getPeers(String)`: Tracker announce → peer list
 - `handshake(String, String)`: Connect to peer, return peer_id
-- `downloadPiece(String, int)`: Full piece download from first available peer
+- `downloadPiece(String, int)`: Full piece download from first available peer, register for seeding
+- `downloadFile(String)`: Download entire file, register for seeding
+- `getSeedingStatus(String)`: Check if seeding a torrent (debug endpoint)
+
+**Seeding Integration**:
+- After successful download, `downloadPiece()` and `downloadFile()` call `peerServer.registerTorrent()`
+- This makes the downloaded content available for other peers to download
+- Seeding continues as long as Spring Boot application is running
 
 ### 5. **BencodeDeserializer** (`bencode/`)
 **Purpose**: Parse .torrent files (bencoded format)
@@ -254,17 +303,188 @@ curl -X POST -F "file=@sample.torrent" http://localhost:8080/api/download/piece/
 
 ## Missing Implementations (TODOs)
 
-1.  **Persistent Seeding**: The client's `Peer` connections are wrapped in `try-with-resources` blocks (as seen in the `BitTorrentService` methods), meaning they close immediately after the download finishes. This should be refactored to keep connections open and continue seeding (uploading) after the file is 100% complete.
+1.  **Multi-peer downloads**: Only uses first peer. Should parallelize across multiple peers for faster downloads.
 
-2.  **Multi-peer downloads**: Only uses first peer. Should parallelize across multiple peers.
+2.  **Peer selection**: No smart peer selection (fastest, closest, etc.). Currently just uses first peer from tracker response.
 
-3.  **Peer selection**: No smart peer selection (fastest, closest, etc.).
+3.  **Resume capability**: No state persistence for partial downloads. If app restarts, must start over.
 
-4.  **Resume capability**: No state persistence for partial downloads.
+4.  **Persistent seeding state**: Seeding state is lost on app restart. Need to save/restore registered torrents.
 
-5.  **GET /api/peers endpoint**: Service method exists but no controller endpoint.
+5.  **Multi-file torrent support**: Only single-file torrents work. Need `FileManager` abstraction for multi-file.
 
-6.  **Inbound Connection Listener**: The client doesn't listen on a `ServerSocket` for incoming connections from other peers. This is required for true seeding and to act as a full peer in the swarm.
+6.  **GET /api/peers endpoint**: Service method exists but no controller endpoint.
+
+7.  **Peer connection lifecycle**: Inbound peer connections from `PeerServer.handleConnection()` are not tracked. Should maintain list of active peers for proper cleanup.
+
+---
+
+## Next Steps (Prioritized Roadmap)
+
+### Phase 1: Critical Fixes (Week 1)
+
+#### 1. Fix Peer Connection Lifecycle ⚠️ **HIGH PRIORITY**
+**Problem**: Resource leak - inbound peers are never tracked or cleaned up.
+
+**Implementation**:
+- Add `Map<String, Peer> activePeers` to `PeerServer`
+- Track peers in `handleConnection()` after creation
+- Monitor connection status in background thread
+- Remove from map when connection closes
+- Implement proper cleanup in `stop()`
+
+**Files to modify**: `PeerServer.java`, `Peer.java` (add connection monitoring)
+
+#### 2. Persistent Seeding State
+**Problem**: Seeding state lost on app restart.
+
+**Implementation**:
+- Create `SeedingStateManager` class
+- Save registered torrents to JSON file (`seedingState.json`)
+- Load on startup in `@PostConstruct`
+- Verify files exist before re-registering
+- Auto-save on torrent registration
+
+**Files to create**: `SeedingStateManager.java`  
+**Files to modify**: `BitTorrentService.java`, `PeerServer.java`
+
+---
+
+### Phase 2: Core Features (Week 2)
+
+#### 3. Multi-File Torrent Support
+**Goal**: Support torrents with multiple files (directories).
+
+**Implementation**:
+- Parse `files` list from torrent metadata in `TorrentInfo`
+- Create `FileManager` class to handle file/directory mapping
+- Map piece offsets to correct files (handle boundaries)
+- Update `Peer.handlePieceRequest()` to read from correct file
+- Support directory creation for nested structures
+
+**Files to create**: `FileManager.java`  
+**Files to modify**: `TorrentInfo.java`, `Peer.java`, `BitTorrentService.java`
+
+#### 4. Multi-Peer Parallel Downloads
+**Goal**: Download different pieces simultaneously from multiple peers.
+
+**Implementation**:
+- Create `DownloadCoordinator` class
+- Use `ExecutorService` with thread pool (5-10 threads)
+- Assign pieces to different peers dynamically
+- Track in-progress pieces to avoid duplication
+- Handle peer failures (reassign piece to another peer)
+- Aggregate results and write to file sequentially
+
+**Files to create**: `DownloadCoordinator.java`  
+**Files to modify**: `BitTorrentService.java`
+
+---
+
+### Phase 3: Optimization (Week 3)
+
+#### 5. Smart Peer Selection Strategy
+**Goal**: Choose fastest/best peers for downloading.
+
+**Implementation**:
+- Track per-peer metrics: download speed, latency, reliability
+- Implement "rarest first" piece selection
+- Prefer peers with rare pieces
+- Rotate peers if performance degrades
+- Add peer scoring system
+
+**Files to create**: `PeerSelector.java`, `PeerMetrics.java`  
+**Files to modify**: `DownloadCoordinator.java`
+
+#### 6. Resume Capability
+**Goal**: Resume interrupted downloads from where they stopped.
+
+**Implementation**:
+- Save bitfield to disk after each piece completes
+- Save partial blocks within incomplete pieces
+- Create `DownloadState` class to manage state
+- On startup: check for existing state, load bitfield
+- Only request missing pieces from peers
+
+**Files to create**: `DownloadState.java`  
+**Files to modify**: `BitTorrentService.java`, `Peer.java`
+
+---
+
+### Phase 4: Production Readiness (Week 4)
+
+#### 7. Proper Choking Algorithm
+**Goal**: Implement BitTorrent's tit-for-tat mechanism.
+
+**Implementation**:
+- Track upload speed per peer
+- Unchoke top 4 fastest uploaders
+- Implement optimistic unchoking (rotate every 30s)
+- Send Choke/Unchoke messages appropriately
+- Prevent bandwidth exhaustion
+
+**Files to modify**: `PeerServer.java`, `Peer.java`
+
+#### 8. Tracker Re-Announcement
+**Goal**: Periodic tracker updates and proper lifecycle events.
+
+**Implementation**:
+- Schedule re-announcements every `interval` seconds
+- Update uploaded/downloaded/left stats
+- Send `stopped` event on shutdown
+- Handle tracker failures gracefully
+- Support multiple trackers (fallback)
+
+**Files to modify**: `TrackerClient.java`, `BitTorrentService.java`
+
+#### 9. Configuration System
+**Goal**: Make hardcoded values configurable.
+
+**Create `application.properties`**:
+```properties
+bittorrent.peer-id=<random-generated>
+bittorrent.listen-port=6881
+bittorrent.max-connections=50
+bittorrent.download-dir=./downloads
+bittorrent.max-upload-rate=1048576
+bittorrent.max-download-rate=5242880
+```
+
+**Files to create**: `BitTorrentConfig.java` (Spring `@ConfigurationProperties`)  
+**Files to modify**: `PeerServer.java`, `BitTorrentService.java`
+
+#### 10. Enhanced Error Handling
+**Goal**: Graceful failure recovery and user-friendly errors.
+
+**Implementation**:
+- Retry failed piece downloads (max 3 attempts)
+- Handle peer disconnections without crashing
+- Return proper HTTP status codes in controllers
+- Add connection timeouts (30s for handshake, 60s for pieces)
+- Log errors with context (peer IP, piece index, etc.)
+
+**Files to modify**: `BitTorrentController.java`, `Peer.java`, `TrackerClient.java`
+
+---
+
+### Quick Wins (Can implement anytime)
+
+- **Randomize Peer ID**: Generate random 20-byte peer ID on startup
+- **Replace System.err with Logging**: Use SLF4J/Logback for proper logging
+- **Add Metrics Endpoint**: Track uploaded/downloaded bytes, active connections
+- **Validate Torrent Files**: Check required fields before processing
+- **Add Request Timeouts**: Prevent hanging on unresponsive peers
+
+---
+
+### Recommended Start Point
+
+**Start with Phase 1 (Critical Fixes)**:
+1. Fix peer connection lifecycle first - it's a memory leak bug
+2. Then add persistent seeding state for better user experience
+
+These two changes will make your client stable and reliable before adding more complex features.
+
 ---
 
 ## Important Notes
