@@ -69,6 +69,15 @@ public class BitTorrentController {
 		// NOTE: In a real app, file content should be uploaded, not referenced by path
 		return bitTorrentService.handshake(file, peer);
 	}
+
+	@GetMapping("/api/debug/status")
+	public ResponseEntity<String> getStatus(@RequestParam String path) {
+		try {
+			return ResponseEntity.ok(bitTorrentService.getSeedingStatus(path));
+		} catch (IOException e) {
+			return ResponseEntity.internalServerError().body("Error: " + e.getMessage());
+		}
+	}
 	
 	// Example: POST /api/download/piece/0 (with .torrent file upload)
 	@PostMapping("/api/download/piece/{pieceIndex}")

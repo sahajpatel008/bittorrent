@@ -177,6 +177,9 @@ public class Peer implements AutoCloseable {
 	}
 
 	public void awaitBitfield() throws IOException, InterruptedException {
+		// If we are the server (responder), we might have already sent our bitfield in the handshake logic
+		// or we might want to send it here. The current logic sends it at the end of this method.
+		
 		if (bitfield) {
 			return;
 		}
@@ -224,7 +227,7 @@ public class Peer implements AutoCloseable {
 	 * Sends our bitfield to the peer, indicating which pieces we have.
 	 * Only sends if we have at least one piece.
 	 */
-	private void sendOurBitfield() throws IOException {
+	public void sendOurBitfield() throws IOException {
 		// Only send bitfield if we have at least one piece
 		if (clientBitfield.isEmpty()) {
 			return;

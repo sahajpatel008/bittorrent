@@ -18,18 +18,43 @@ import bittorrent.BitTorrentApplication;
 import bittorrent.bencode.BencodeDeserializer;
 import bittorrent.magnet.Magnet;
 import bittorrent.peer.Peer;
+import bittorrent.peer.PeerServer;
 import bittorrent.torrent.Torrent;
 import bittorrent.torrent.TorrentInfo;
 import bittorrent.tracker.TrackerClient;
 import bittorrent.tracker.Announceable;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 
 // Using a @Service to integrate logic into Spring's component model
 @Service
 public class BitTorrentService {
-
+ 
 	private final TrackerClient trackerClient = new TrackerClient();
 	private final Gson gson = new Gson();
 	private final HexFormat hexFormat = BitTorrentApplication.HEX_FORMAT;
+	private final PeerServer peerServer;
+
+	public BitTorrentService(PeerServer peerServer) {
+		this.peerServer = peerServer;
+	}
+
+	@PostConstruct
+	public void init() {
+		peerServer.start();
+	}
+
+	@PreDestroy
+	public void cleanup() {
+		peerServer.stop();
+	}
+
+    // --- Debug / Status Methods ---
+
+	public String getSeedingStatus(String path) throws IOException {
+		Torrent torrent = load(path);
+		return peerServer.getTorrentStatus(torrent.info().hash());
+	}
 
     // --- Utility Methods ---
 
@@ -95,11 +120,12 @@ public class BitTorrentService {
 		final var torrent = load(path);
 		final var torrentInfo = torrent.info();
 
+		// Register torrent with PeerServer for seeding
+		final var fullFile = new File(torrentInfo.name());
+		peerServer.registerTorrent(torrentInfo, fullFile);
+
 		final var firstPeer = trackerClient.announce(torrent).peers().getFirst();
 		final var tempFile = File.createTempFile("piece-", ".bin");
-
-		// This is the (potentially empty) file we will read from for uploads
-		final var fullFile = new File(torrentInfo.name());
 
 		try (
 			final var peer = Peer.connect(firstPeer, torrent, torrentInfo, fullFile);
@@ -115,9 +141,12 @@ public class BitTorrentService {
 		final var torrent = load(path);
 		final var torrentInfo = torrent.info();
 
+		// Register torrent with PeerServer for seeding
+		final var tempFile = new File(torrentInfo.name());
+		peerServer.registerTorrent(torrentInfo, tempFile);
+
 		// TODO: later we need to add peer picking strategy
 		final var firstPeer = trackerClient.announce(torrent).peers().getFirst();
-		final var tempFile = new File(torrentInfo.name());
 
 		try (
 				final var peer = Peer.connect(firstPeer, torrent, torrentInfo, tempFile);
