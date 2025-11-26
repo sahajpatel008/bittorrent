@@ -1,0 +1,36 @@
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+[32m :: Spring Boot :: [39m              [2m (v3.2.0)[0;39m
+
+[2m2025-11-25T22:06:18.121-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36mb.loadbalancer.LoadBalancerApplication  [0;39m [2m:[0;39m Starting LoadBalancerApplication using Java 24.0.1 with PID 47221 (/Users/manavvakharia/Main/Data - Dell/SCU/Courses/CSEN317 - Distributed Systems/Project/bittorrent/target/java_bittorrent.jar started by manavvakharia in /Users/manavvakharia/Main/Data - Dell/SCU/Courses/CSEN317 - Distributed Systems/Project/bittorrent)
+[2m2025-11-25T22:06:18.124-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36mb.loadbalancer.LoadBalancerApplication  [0;39m [2m:[0;39m No active profile set, falling back to 1 default profile: "default"
+[2m2025-11-25T22:06:18.458-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36m.s.d.r.c.RepositoryConfigurationDelegate[0;39m [2m:[0;39m Bootstrapping Spring Data Redis repositories in DEFAULT mode.
+[2m2025-11-25T22:06:18.474-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36m.s.d.r.c.RepositoryConfigurationDelegate[0;39m [2m:[0;39m Finished Spring Data repository scanning in 7 ms. Found 0 Redis repository interfaces.
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by org.apache.tomcat.jni.Library in an unnamed module (file:/Users/manavvakharia/Main/Data%20-%20Dell/SCU/Courses/CSEN317%20-%20Distributed%20Systems/Project/bittorrent/target/java_bittorrent.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+[2m2025-11-25T22:06:18.769-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36mo.s.b.w.embedded.tomcat.TomcatWebServer [0;39m [2m:[0;39m Tomcat initialized with port 8080 (http)
+[2m2025-11-25T22:06:18.777-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36mo.apache.catalina.core.StandardService  [0;39m [2m:[0;39m Starting service [Tomcat]
+[2m2025-11-25T22:06:18.777-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36mo.apache.catalina.core.StandardEngine   [0;39m [2m:[0;39m Starting Servlet engine: [Apache Tomcat/10.1.16]
+[2m2025-11-25T22:06:18.855-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36mo.a.c.c.C.[Tomcat].[localhost].[/]      [0;39m [2m:[0;39m Initializing Spring embedded WebApplicationContext
+[2m2025-11-25T22:06:18.855-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36mw.s.c.ServletWebServerApplicationContext[0;39m [2m:[0;39m Root WebApplicationContext: initialization completed in 708 ms
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by io.netty.util.internal.PlatformDependent0$4 (file:/Users/manavvakharia/Main/Data%20-%20Dell/SCU/Courses/CSEN317%20-%20Distributed%20Systems/Project/bittorrent/target/java_bittorrent.jar)
+WARNING: Please consider reporting this to the maintainers of class io.netty.util.internal.PlatformDependent0$4
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+[2m2025-11-25T22:06:19.379-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36mo.s.b.w.embedded.tomcat.TomcatWebServer [0;39m [2m:[0;39m Tomcat started on port 8080 (http) with context path ''
+[2m2025-11-25T22:06:19.382-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[           main][0;39m [2m[0;39m[36mb.loadbalancer.LoadBalancerApplication  [0;39m [2m:[0;39m Started LoadBalancerApplication in 1.434 seconds (process running for 1.651)
+[2m2025-11-25T22:06:19.439-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[nio-8080-exec-1][0;39m [2m[0;39m[36mo.a.c.c.C.[Tomcat].[localhost].[/]      [0;39m [2m:[0;39m Initializing Spring DispatcherServlet 'dispatcherServlet'
+[2m2025-11-25T22:06:19.439-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[nio-8080-exec-1][0;39m [2m[0;39m[36mo.s.web.servlet.DispatcherServlet       [0;39m [2m:[0;39m Initializing Servlet 'dispatcherServlet'
+[2m2025-11-25T22:06:19.440-08:00[0;39m [32m INFO[0;39m [35m47221[0;39m [2m---[0;39m [2m[nio-8080-exec-1][0;39m [2m[0;39m[36mo.s.web.servlet.DispatcherServlet       [0;39m [2m:[0;39m Completed initialization in 1 ms
+LoadBalancer: Registered new tracker at http://localhost:50019
+LoadBalancer: Registered new tracker at http://localhost:50021
+LoadBalancer: Forwarding to http://localhost:50019/announce?info_hash=aaaaaaaaaaaaaaaaaaaa&peer_id=PEER_A&port=1111
+LoadBalancer: Forwarding to http://localhost:50021/announce?info_hash=aaaaaaaaaaaaaaaaaaaa&peer_id=PEER_B&port=2222

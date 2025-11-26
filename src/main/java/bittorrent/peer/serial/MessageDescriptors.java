@@ -9,10 +9,9 @@ import bittorrent.bencode.BencodeSerializer;
 import bittorrent.peer.protocol.Message;
 import bittorrent.peer.protocol.MetadataMessage;
 import bittorrent.peer.serial.extension.MetadataMessageSerial;
-import lombok.experimental.UtilityClass;
 
-@UtilityClass
 public class MessageDescriptors {
+    private MessageDescriptors() {}
 
 	private static final Map<Class<?>, MessageDescriptor<?>> CLASS_TO_DESCRIPTOR = new HashMap<>();
 	private static final Map<Byte, MessageDescriptor<?>> TYPE_ID_TO_DESCRIPTOR = new HashMap<>();

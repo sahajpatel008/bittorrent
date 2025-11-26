@@ -42,6 +42,7 @@ public class Peer implements AutoCloseable {
 	private static final MessageSerialContext METADATA_CONTEXT = new MessageSerialContext(MetadataMessage.class);
 
 	private final @Getter byte[] id;
+	public byte[] getId() { return id; }
 	private final Socket socket;
 	private final boolean supportExtensions;
 

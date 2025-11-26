@@ -3,23 +3,20 @@ package bittorrent.tracker;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import bittorrent.BitTorrentApplication; // Changed from bittorrent.Main
+import bittorrent.BitTorrentApplication;
 import bittorrent.util.NetworkUtils;
-import lombok.SneakyThrows;
 
 public record AnnounceResponse(
 	long interval,
 	List<InetSocketAddress> peers
 ) {
 
-	@SneakyThrows
 	public static AnnounceResponse of(Map<String, Object> root, short selfPort) {
-		if (BitTorrentApplication.DEBUG) { // Using constant from new application class
+		if (BitTorrentApplication.DEBUG) {
 			System.err.println("AnnounceResponse: %s".formatted(root));
 		}
 
