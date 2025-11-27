@@ -31,8 +31,8 @@ public class BencodeSerializer {
 			writeNumber(Integer.toUnsignedLong(number), outputStream);
 		} else if (root instanceof Short number) {
 			writeNumber(Short.toUnsignedInt(number), outputStream);
-		} else if (root instanceof Byte number) {
-			writeNumber(Byte.toUnsignedInt(number), outputStream);
+		} else if (root instanceof byte[] bytes) {
+			writeBytes(bytes, outputStream);
 		} else if (root instanceof List<?> list) {
 			writeList(list, outputStream);
 		} else if (root instanceof Map<?, ?> map) {
@@ -43,9 +43,13 @@ public class BencodeSerializer {
 	}
 
 	public void writeString(String string, OutputStream outputStream) throws IOException {
-		outputStream.write(String.valueOf(string.length()).getBytes());
+		writeBytes(string.getBytes(StandardCharsets.ISO_8859_1), outputStream);
+	}
+
+	public void writeBytes(byte[] bytes, OutputStream outputStream) throws IOException {
+		outputStream.write(String.valueOf(bytes.length).getBytes());
 		outputStream.write(COLON_BYTE);
-		outputStream.write(string.getBytes(StandardCharsets.ISO_8859_1));
+		outputStream.write(bytes);
 	}
 
 	public void writeNumber(long number, OutputStream outputStream) throws IOException {

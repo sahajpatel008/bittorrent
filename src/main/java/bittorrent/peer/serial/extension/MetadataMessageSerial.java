@@ -16,7 +16,7 @@ public class MetadataMessageSerial {
 	public static final String TOTAL_SIZE = "total_size";
 	public static final String MESSAGE_TYPE_KEY = "msg_type";
 
-	public Map<String, ?> serialize(MetadataMessage message) {
+	public static Map<String, ?> serialize(MetadataMessage message) {
 		return switch (message) {
 			case MetadataMessage.Handshake handshake -> Map.of(
 				EXTENSION_IDS_KEY, handshake.extensionIds()
@@ -32,7 +32,7 @@ public class MetadataMessageSerial {
 	}
 
 	@SuppressWarnings("unchecked")
-	public MetadataMessage deserialize(List<Object> objects) {
+	public static MetadataMessage deserialize(List<Object> objects) {
 		final var content = (Map<String, Object>) objects.getFirst();
 
 		final var type = (Long) content.get(MESSAGE_TYPE_KEY);

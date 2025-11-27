@@ -146,7 +146,8 @@ public class PeerServer {
             // We should probably keep track of this peer somewhere, but for now let it run.
             System.out.println("Handshake successful with " + socket.getRemoteSocketAddress());
             
-            // Send our bitfield immediately
+            // Mark all pieces as present (we are a seeder for this torrent) and send our bitfield
+            peer.markAllPiecesPresent();
             peer.sendOurBitfield();
             
         } catch (IOException e) {

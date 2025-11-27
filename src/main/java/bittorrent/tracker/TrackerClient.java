@@ -13,9 +13,22 @@ public class TrackerClient {
 
 	public final OkHttpClient client = new OkHttpClient();
 
-	@SuppressWarnings("unchecked")
 	public AnnounceResponse announce(Announceable announceable) throws IOException {
-		final var selfPort = (short) 6881;
+		return announce(announceable, 6881, announceable.getInfoLength());
+	}
+
+	@SuppressWarnings("unchecked")
+	public AnnounceResponse announce(Announceable announceable, int port) throws IOException {
+		return announce(announceable, port, announceable.getInfoLength());
+	}
+
+	/**
+	 * Announces with an explicit 'left' value so the tracker can know how much of
+	 * the file this peer still needs (0 means completed / seeding).
+	 */
+	@SuppressWarnings("unchecked")
+	public AnnounceResponse announce(Announceable announceable, int port, long left) throws IOException {
+		final short selfPort = (short) port;
 		final var trackerUrl = announceable.getTrackerUrl();
 		System.out.println("Attempting to pass tracker url : " + trackerUrl);
 		final var request = new Request.Builder()
@@ -27,8 +40,8 @@ public class TrackerClient {
 					.addQueryParameter("peer_id", "00112233445566778899")
 					.addQueryParameter("port", String.valueOf(selfPort))
 					.addQueryParameter("uploaded", "0")
-					.addQueryParameter("downloaded", "0")
-					.addQueryParameter("left", String.valueOf(announceable.getInfoLength()))
+					.addQueryParameter("downloaded", String.valueOf(announceable.getInfoLength() - left))
+					.addQueryParameter("left", String.valueOf(left))
 					.addQueryParameter("compact", "1")
 					.build()
 			)

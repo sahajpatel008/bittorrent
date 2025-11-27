@@ -208,7 +208,11 @@ public class MessageDescriptors {
 			final var extensionType = context.extensionType();
 			if (MetadataMessage.class.equals(extensionType)) {
 				final var content = MetadataMessageSerial.serialize((MetadataMessage) message.content());
-				serializedContent = new BencodeSerializer().writeAsBytes(content);
+				try {
+					serializedContent = new BencodeSerializer().writeAsBytes(content);
+				} catch (java.io.IOException e) {
+					throw new RuntimeException(e);
+				}
 			} else {
 				throw new UnsupportedOperationException("unknown extension: %s".formatted(extensionType.getName()));
 			}
@@ -219,19 +223,23 @@ public class MessageDescriptors {
 			return 1 + 1 + serializedContent.length;
 		},
 		(payloadLength, input, context) -> {
-			final var id = input.readByte();
-			final var raw = input.readNBytes(payloadLength - 1);
-			System.err.println(new String(raw));
-			final var parsed = new BencodeDeserializer(raw).parseMultiple();
-
-			final var extensionType = context.extensionType();
-			if (MetadataMessage.class.equals(extensionType)) {
-				return new Message.Extension(
-					id,
-					MetadataMessageSerial.deserialize(parsed)
-				);
-			} else {
-				throw new UnsupportedOperationException("unknown extension: %s".formatted(extensionType.getName()));
+			try {
+				final var id = input.readByte();
+				final var raw = input.readNBytes(payloadLength - 1);
+				System.err.println(new String(raw));
+				final var parsed = new BencodeDeserializer(raw).parseMultiple();
+	
+				final var extensionType = context.extensionType();
+				if (MetadataMessage.class.equals(extensionType)) {
+					return new Message.Extension(
+						id,
+						MetadataMessageSerial.deserialize(parsed)
+					);
+				} else {
+					throw new UnsupportedOperationException("unknown extension: %s".formatted(extensionType.getName()));
+				}
+			} catch (java.io.IOException e) {
+				throw new RuntimeException(e);
 			}
 		}
 	);

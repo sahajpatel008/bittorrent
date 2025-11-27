@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
@@ -88,11 +89,11 @@ public class BitTorrentController {
 			final var tempTorrentFile = java.io.File.createTempFile("torrent-", ".torrent");
 			file.transferTo(tempTorrentFile);
 			
-			final var downloadedPiece = bitTorrentService.downloadPiece(tempTorrentFile.getAbsolutePath(), pieceIndex);
+			final byte[] downloadedPiece = bitTorrentService.downloadPiece(tempTorrentFile.getAbsolutePath(), pieceIndex);
 			
 			tempTorrentFile.delete(); // Clean up torrent file
 			
-			final var resource = new FileSystemResource(downloadedPiece);
+			final var resource = new ByteArrayResource(downloadedPiece);
 			
 			return ResponseEntity.ok()
 				.header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"piece-%d.bin\"".formatted(pieceIndex))

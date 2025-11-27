@@ -18,7 +18,18 @@ public record TorrentInfo(
 
 	public static TorrentInfo of(Map<String, Object> root) {
 		final var hash = DigestUtils.shaInfo(root);
-		final var length = (long) root.getOrDefault("length", -1l);
+		final long length;
+		if (root.containsKey("length")) {
+			// Single-file mode
+			length = (long) root.get("length");
+		} else {
+			// Multi-file mode: sum lengths of all files
+			@SuppressWarnings("unchecked")
+			final var files = (List<Map<String, Object>>) root.get("files");
+			length = files.stream()
+				.mapToLong(file -> (long) file.get("length"))
+				.sum();
+		}
 		final var name = (String) root.get("name");
 		final var pieceLength = (int) (long) root.get("piece length");
 

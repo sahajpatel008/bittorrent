@@ -41,7 +41,10 @@ public class Peer implements AutoCloseable {
 
 	private static final MessageSerialContext METADATA_CONTEXT = new MessageSerialContext(MetadataMessage.class);
 
-	private final @Getter byte[] id;
+	public byte[] getId() {
+		return id;
+	}
+	private final byte[] id;
 	private final Socket socket;
 	private final boolean supportExtensions;
 
@@ -81,6 +84,14 @@ public class Peer implements AutoCloseable {
 		this.readerThread.setDaemon(true);
 		this.readerThread.start();
 
+	}
+
+	/**
+	 * Marks all pieces as present in the local bitfield.
+	 * Intended for seeder-side peers that already have the full file.
+	 */
+	public void markAllPiecesPresent() {
+		clientBitfield.set(0, torrentInfo.pieces().size());
 	}
 
 	private Message doReceive(MessageSerialContext context) throws IOException {
