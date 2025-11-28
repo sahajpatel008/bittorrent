@@ -2,6 +2,7 @@ package bittorrent.util;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -44,6 +45,38 @@ public class NetworkUtils {
 		}
 
 		return addresses;
+	}
+
+	/**
+	 * Serializes a list of IPv4 socket addresses into the compact BitTorrent
+	 * representation (6 bytes per peer: 4 for IP, 2 for port) and returns it as
+	 * an ISO-8859-1 string.
+	 */
+	public static String toV4CompactString(List<InetSocketAddress> addresses) {
+		if (addresses == null || addresses.isEmpty()) {
+			return "";
+		}
+
+		final var bytes = new java.io.ByteArrayOutputStream();
+
+		for (InetSocketAddress addr : addresses) {
+			try {
+				byte[] ipBytes = addr.getAddress().getAddress();
+				// Only support IPv4 for compact representation
+				if (ipBytes.length != 4) {
+					continue;
+				}
+
+				bytes.write(ipBytes);
+				int port = addr.getPort();
+				bytes.write((port >> 8) & 0xFF);
+				bytes.write(port & 0xFF);
+			} catch (Exception e) {
+				// Skip invalid addresses
+			}
+		}
+
+		return new String(bytes.toByteArray(), StandardCharsets.ISO_8859_1);
 	}
 
 }

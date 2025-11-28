@@ -24,6 +24,7 @@ import bittorrent.Main;
 import bittorrent.magnet.Magnet;
 import bittorrent.peer.protocol.Message;
 import bittorrent.peer.protocol.MetadataMessage;
+import bittorrent.peer.protocol.PexMessage;
 import bittorrent.peer.serial.MessageDescriptor;
 import bittorrent.peer.serial.MessageDescriptors;
 import bittorrent.peer.serial.MessageSerialContext;
@@ -39,7 +40,8 @@ public class Peer implements AutoCloseable {
 	private static final byte[] PADDING_8 = new byte[8];
 	private static final byte[] PADDING_MAGNET_8 = { 0, 0, 0, 0, 0, 0x10, 0, 0 };
 
-	private static final MessageSerialContext METADATA_CONTEXT = new MessageSerialContext(MetadataMessage.class);
+	// Per-connection extension context (IDs are negotiated via handshake)
+	private final MessageSerialContext extensionContext = new MessageSerialContext();
 
 	public byte[] getId() {
 		return id;
@@ -51,6 +53,10 @@ public class Peer implements AutoCloseable {
 	private boolean bitfield;
 	private boolean interested;
 	private @Getter int metadataExtensionId = -1;
+	private @Getter int pexExtensionId = -1;
+
+	// Hex-encoded info hash for swarm bookkeeping (PEX, SwarmManager)
+	private final String infoHashHex;
 
 	private Deque<Message> receiveQueue;
 
@@ -72,6 +78,7 @@ public class Peer implements AutoCloseable {
 		this.supportExtensions = supportExtensions;
 		this.torrentInfo = torrentInfo; 
 		this.downloadedFile = downloadedFile; 
+		this.infoHashHex = Main.HEX_FORMAT.formatHex(torrentInfo.hash());
 
 		this.receiveQueue = new LinkedList<>();
 
@@ -196,22 +203,40 @@ public class Peer implements AutoCloseable {
 		}
 
 		if (supportExtensions) {
+			// Advertise the extensions we support. For now, we announce
+			// ut_metadata and ut_pex with arbitrary local IDs.
+			final Map<String, Integer> localExtensions = Map.of(
+				"ut_metadata", 42,
+				"ut_pex", 43
+			);
+
 			send(
 				new Message.Extension(
 					(byte) 0,
-					new MetadataMessage.Handshake(Map.of(
-						"ut_metadata", 42
-					))
+					new MetadataMessage.Handshake(localExtensions)
 				),
-				METADATA_CONTEXT
+				null
 			);
 			
 			// This part should still work as handleMessage adds Extensions to receiveQueue
-			final var extension = waitFor(Message.Extension.class, METADATA_CONTEXT);
+			final var extension = waitFor(Message.Extension.class, null);
 			System.err.println("extension: %s".formatted(extension));
 
-			final var metadata = (MetadataMessage.Handshake) extension.content();
-			metadataExtensionId = metadata.extensionIds().get("ut_metadata");
+			// Deserialize handshake content
+			@SuppressWarnings("unchecked")
+			final var objects = (java.util.List<Object>) extension.content();
+			final var metadata = bittorrent.peer.serial.extension.MetadataMessageSerial.deserialize(objects);
+			if (metadata instanceof MetadataMessage.Handshake handshake) {
+				var ids = handshake.extensionIds();
+				if (ids.containsKey("ut_metadata")) {
+					metadataExtensionId = ids.get("ut_metadata");
+					extensionContext.registerExtension((byte) metadataExtensionId, "ut_metadata");
+				}
+				if (ids.containsKey("ut_pex")) {
+					pexExtensionId = ids.get("ut_pex");
+					extensionContext.registerExtension((byte) pexExtensionId, "ut_pex");
+				}
+			}
 		}
 
 		// waitFor(Message.Bitfield.class, null);
@@ -358,6 +383,31 @@ public class Peer implements AutoCloseable {
 		// (received by the reader loop) before sending 'Request' messages.
 	}
 
+	/**
+	 * Sends a simple PEX update with the peers currently known for this
+	 * torrent, if the PEX extension has been negotiated.
+	 */
+	public void sendPexUpdate() throws IOException {
+		if (pexExtensionId < 0) {
+			return;
+		}
+
+		var swarm = SwarmManager.getInstance();
+		// For now we don't distinguish added vs dropped; we just share the
+		// current known peers as "added".
+		var known = swarm.acquirePeers(infoHashHex, 50);
+		if (known.isEmpty()) {
+			return;
+		}
+
+		var pex = new PexMessage.Pex(known, java.util.Collections.emptyList());
+
+		send(new Message.Extension(
+			(byte) pexExtensionId,
+			pex
+		));
+	}
+
 	@Override
 	public void close() throws IOException, InterruptedException {
 		readerThread.interrupt(); // Stop the reader thread
@@ -430,18 +480,31 @@ public class Peer implements AutoCloseable {
 	}
 
 	public MetadataMessage sendMetadata(MetadataMessage message) throws IOException {
+		if (metadataExtensionId < 0) {
+			throw new IllegalStateException("Metadata extension not negotiated");
+		}
+
 		send(
 			new Message.Extension(
 				(byte) metadataExtensionId,
 				message
 			),
-			METADATA_CONTEXT
+			extensionContext
 		);
 
-		return (MetadataMessage) waitFor(
+		Message.Extension ext = waitFor(
 			Message.Extension.class,
-			METADATA_CONTEXT
-		).content();
+			extensionContext
+		);
+
+		Object content = ext.content();
+		if (content instanceof MetadataMessage metadataMessage) {
+			return metadataMessage;
+		}
+
+		@SuppressWarnings("unchecked")
+		var objects = (java.util.List<Object>) content;
+		return bittorrent.peer.serial.extension.MetadataMessageSerial.deserialize(objects);
 	}
 
 	public TorrentInfo queryTorrentInfoViaMetadataExtension() throws IOException, InterruptedException {
@@ -474,7 +537,7 @@ public class Peer implements AutoCloseable {
 
 				MessageSerialContext context = null;
 				if (descriptor.typeId() == MessageDescriptors.EXTENSION.typeId()) {
-						context = METADATA_CONTEXT;
+					context = extensionContext;
 				}
 				
 				final var message = descriptor.deserialize(length - 1, dataInputStream, context);
@@ -527,8 +590,33 @@ public class Peer implements AutoCloseable {
 			// This is for our download. Store it.
 			this.bitfield = true; 
 			receiveQueue.add(message); // Also add to queue for awaitBitfield()
-		} else if (message instanceof Message.Extension) {
-			receiveQueue.add(message); // Add to queue for awaitBitfield()
+		} else if (message instanceof Message.Extension extension) {
+			// Extension messages can be metadata (handshake / data) or PEX.
+			byte extId = extension.id();
+
+			// During initial handshake we just queue the message for awaitBitfield()
+			if (metadataExtensionId == -1 && pexExtensionId == -1) {
+				receiveQueue.add(extension);
+				return;
+			}
+
+			if (extId == metadataExtensionId || extId == 0) {
+				// Queue metadata-related messages for the metadata helpers
+				receiveQueue.add(extension);
+			} else if (extId == pexExtensionId) {
+				@SuppressWarnings("unchecked")
+				var objects = (java.util.List<Object>) extension.content();
+				var pex = bittorrent.peer.serial.extension.PexMessageSerial.deserialize(objects);
+
+				if (pex instanceof PexMessage.Pex pexMsg) {
+					SwarmManager.getInstance().onPexPeersDiscovered(infoHashHex, pexMsg.added());
+				}
+			} else {
+				// Unknown extension ID for this connection – ignore for now.
+				if (BitTorrentApplication.DEBUG) {
+					System.err.println("Unknown extension id: " + extId);
+				}
+			}
 		}
 		// You can add handlers for Choke, Unchoke, Have, Cancel here
 	}

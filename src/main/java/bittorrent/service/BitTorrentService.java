@@ -24,6 +24,7 @@ import bittorrent.bencode.BencodeDeserializer;
 import bittorrent.bencode.BencodeSerializer;
 import bittorrent.config.BitTorrentConfig;
 import bittorrent.peer.Peer;
+import bittorrent.peer.SwarmManager;
 import bittorrent.peer.PeerServer;
 import bittorrent.torrent.Torrent;
 import bittorrent.torrent.TorrentInfo;
@@ -297,30 +298,88 @@ public class BitTorrentService {
 		final var tempFile = File.createTempFile("bittorrent-download-", ".tmp");
 		peerServer.registerTorrent(torrentInfo, tempFile);
 
-		// TODO: later we need to add peer picking strategy
-		final var response = trackerClient.announce(torrent);
-		final var peers = response.peers().stream()
-			.filter(p -> p.getPort() != config.getListenPort()) // avoid connecting to ourselves
-			.toList();
+		final String infoHashHex = hexFormat.formatHex(torrentInfo.hash());
+		final SwarmManager swarmManager = SwarmManager.getInstance();
 
-		if (peers.isEmpty()) {
-			System.out.println("No other peers returned by tracker.");
+		// 1) Ensure we have some peers in the swarm. Prefer tracker when we
+		// have too few known peers, otherwise rely on PEX / existing state.
+		final int MIN_KNOWN_PEERS = 3;
+		java.util.List<java.net.InetSocketAddress> candidatePeers =
+			swarmManager.acquirePeers(infoHashHex, MIN_KNOWN_PEERS);
+
+		if (candidatePeers.size() < MIN_KNOWN_PEERS) {
+			final var response = trackerClient.announce(torrent);
+			final var trackerPeers = response.peers().stream()
+				.filter(p -> p.getPort() != config.getListenPort()) // avoid connecting to ourselves
+				.toList();
+
+			if (trackerPeers.isEmpty() && candidatePeers.isEmpty()) {
+				System.out.println("No other peers returned by tracker or PEX.");
+				return null;
+			}
+
+			swarmManager.registerTrackerPeers(infoHashHex, trackerPeers, config.getListenPort());
+			candidatePeers = swarmManager.acquirePeers(
+				infoHashHex,
+				Math.min(5, Math.max(MIN_KNOWN_PEERS, trackerPeers.size()))
+			);
+		}
+
+		// 2) Connect to a small number of peers in parallel
+		final int maxPeers = Math.min(3, candidatePeers.size());
+
+		if (candidatePeers.isEmpty() || maxPeers == 0) {
+			System.out.println("No candidate peers available for connection.");
 			return null;
 		}
 
-		final var firstPeer = peers.getFirst();
+		final var peers = new java.util.ArrayList<Peer>();
+		try {
+			for (var addr : candidatePeers) {
+				try {
+					var peer = Peer.connect(addr, torrent, torrentInfo, tempFile, config.getPeerId());
+					peers.add(peer);
+					swarmManager.registerActivePeer(infoHashHex, addr);
+				} catch (IOException e) {
+					System.err.println("Failed to connect to peer " + addr + ": " + e.getMessage());
+				}
+			}
 
-		try (
-				final var peer = Peer.connect(firstPeer, torrent, torrentInfo, tempFile, config.getPeerId());
-				final var fileOutputStream = new FileOutputStream(tempFile);
-		) {
-			final var data = peer.downloadFile(torrentInfo);
-			fileOutputStream.write(data);
+			if (peers.isEmpty()) {
+				System.out.println("Could not connect to any peers.");
+				return null;
+			}
+
+			// 3) Very simple multi-peer scheduler: assign pieces round-robin
+			final int pieceCount = torrentInfo.pieces().size();
+			final var pieceData = new byte[pieceCount][];
+
+			for (int pieceIndex = 0; pieceIndex < pieceCount; pieceIndex++) {
+				// Pick a peer in round-robin fashion
+				Peer peer = peers.get(pieceIndex % peers.size());
+				byte[] data = peer.downloadPiece(torrentInfo, pieceIndex);
+				pieceData[pieceIndex] = data;
+			}
+
+			// 4) Write all pieces to the temp file
+			try (final var fileOutputStream = new FileOutputStream(tempFile)) {
+				for (int i = 0; i < pieceCount; i++) {
+					fileOutputStream.write(pieceData[i]);
+				}
+			}
 
 			// Inform tracker that we now have the full file (left=0)
 			trackerClient.announce(torrent, config.getListenPort(), 0L);
 
 			return tempFile;
+		} finally {
+			// Close peers and unregister active entries
+			for (int i = 0; i < peers.size(); i++) {
+				Peer p = peers.get(i);
+				try {
+					p.close();
+				} catch (Exception ignored) {}
+			}
 		}
 	}
 }
