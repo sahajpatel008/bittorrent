@@ -129,7 +129,11 @@ public class BitTorrentService {
 			case "download" -> {
 				// Similar logic
 				if (args.length >= 4) {
-					downloadFile(args[3]); // args[2] is output
+					String outputPath = args[2];
+					File downloaded = downloadFile(args[3]);
+					Files.copy(downloaded.toPath(), Paths.get(outputPath), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+					downloaded.delete();
+					System.out.println("Downloaded to: " + outputPath);
 				}
 			}
 			case "seed" -> seed(args[1], args[2]); // seed <torrent> <filePath>
