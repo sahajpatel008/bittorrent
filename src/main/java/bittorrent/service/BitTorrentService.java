@@ -43,7 +43,7 @@ import jakarta.annotation.PreDestroy;
 @Service
 public class BitTorrentService {
  
-	private final TrackerClient trackerClient = new TrackerClient();
+	private final TrackerClient trackerClient;
 	private final Gson gson = new Gson();
 	private final HexFormat hexFormat = BitTorrentApplication.HEX_FORMAT;
 	private final PeerServer peerServer;
@@ -59,12 +59,13 @@ public class BitTorrentService {
 	public BitTorrentService(PeerServer peerServer, BitTorrentConfig config) {
 		this.peerServer = peerServer;
 		this.config = config;
-		
+
 		// Create download directory if it doesn't exist
 		File downloadDir = new File(DEFAULT_DOWNLOAD_DIR);
 		if (!downloadDir.exists()) {
 			downloadDir.mkdirs();
 		}
+		this.trackerClient = new TrackerClient(config.getPeerId(), config.getListenPort());
 	}
 
 	@PostConstruct
