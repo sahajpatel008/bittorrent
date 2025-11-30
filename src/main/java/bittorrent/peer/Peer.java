@@ -7,11 +7,16 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Predicate;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingDeque;
@@ -70,7 +75,13 @@ public class Peer implements AutoCloseable {
 	private volatile boolean amChoking = true;
 
 	// Client-side bitfield to track which pieces we have downloaded and verified
-	private final BitSet clientBitfield; 
+	private final BitSet clientBitfield;
+
+	// PEX-related fields
+	private final InetSocketAddress remoteAddress;
+	private final Thread pexUpdateThread;
+	private volatile boolean closed = false;
+	private static final long PEX_UPDATE_INTERVAL_MS = 15_000; // 15 seconds 
 
 	public Peer(byte[] id, Socket socket, boolean supportExtensions, TorrentInfo torrentInfo, File downloadedFile) {
 		this.id = id;
@@ -79,6 +90,9 @@ public class Peer implements AutoCloseable {
 		this.torrentInfo = torrentInfo; 
 		this.downloadedFile = downloadedFile; 
 		this.infoHashHex = Main.HEX_FORMAT.formatHex(torrentInfo.hash());
+
+		// Store remote address for PEX
+		this.remoteAddress = (InetSocketAddress) socket.getRemoteSocketAddress();
 
 		this.receiveQueue = new LinkedList<>();
 
@@ -91,6 +105,14 @@ public class Peer implements AutoCloseable {
 		this.readerThread.setDaemon(true);
 		this.readerThread.start();
 
+		// Start PEX update thread for periodic updates
+		this.pexUpdateThread = new Thread(this::runPexUpdateLoop);
+		this.pexUpdateThread.setName("PeerPex-" + socket.getRemoteSocketAddress());
+		this.pexUpdateThread.setDaemon(true);
+		this.pexUpdateThread.start();
+
+		// Register with PeerConnectionManager
+		PeerConnectionManager.getInstance().registerConnection(infoHashHex, this);
 	}
 
 	/**
@@ -141,7 +163,8 @@ public class Peer implements AutoCloseable {
 	}
 
 	public Message waitFor(Predicate<Message> predicate, MessageSerialContext context) throws IOException {
-		final var iterator = receiveQueue.iterator();
+		// First check the queue
+		var iterator = receiveQueue.iterator();
 		while (iterator.hasNext()) {
 			final var message = iterator.next();
 
@@ -153,15 +176,29 @@ public class Peer implements AutoCloseable {
 			}
 		}
 
+		// If not in queue, wait for reader loop to add it
+		// Don't read directly from socket - the reader loop handles that
 		while (true) {
-			final var message = receive(false, context);
-
-			if (predicate.test(message)) {
-				return message;
+			synchronized (receiveQueue) {
+				// Check queue again (reader loop might have added messages)
+				iterator = receiveQueue.iterator();
+				while (iterator.hasNext()) {
+					final var message = iterator.next();
+					if (predicate.test(message)) {
+						System.err.println("wait for: found: message=%s".formatted(message));
+						iterator.remove();
+						return message;
+					}
+				}
+				
+				// Wait for reader loop to add a message
+				try {
+					receiveQueue.wait(100); // Wait up to 100ms, then check again
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					throw new IOException("Interrupted while waiting for message", e);
+				}
 			}
-
-			System.err.println("wait for: push: message=%s".formatted(message));
-			receiveQueue.add(message);
 		}
 	}
 
@@ -218,8 +255,39 @@ public class Peer implements AutoCloseable {
 				null
 			);
 			
-			// This part should still work as handleMessage adds Extensions to receiveQueue
-			final var extension = waitFor(Message.Extension.class, null);
+			if (BitTorrentApplication.DEBUG) {
+				System.err.printf("Peer[%s]: Sent extension handshake, waiting for response...%n", remoteAddress);
+			}
+			
+			// Wait for extension handshake response
+			// Check queue first, then wait if needed
+			Message.Extension extension = null;
+			
+			// First check if extension is already in queue
+			var queueIter = receiveQueue.iterator();
+			while (queueIter.hasNext()) {
+				var msg = queueIter.next();
+				if (msg instanceof Message.Extension ext && ext.id() == 0) {
+					extension = ext;
+					queueIter.remove();
+					if (BitTorrentApplication.DEBUG) {
+						System.err.printf("Peer[%s]: Found extension handshake in queue%n", remoteAddress);
+					}
+					break;
+				}
+			}
+			
+			// If not in queue, wait for it
+			if (extension == null) {
+				if (BitTorrentApplication.DEBUG) {
+					System.err.printf("Peer[%s]: Extension handshake not in queue, waiting...%n", remoteAddress);
+				}
+				extension = waitFor(Message.Extension.class, null);
+				if (BitTorrentApplication.DEBUG) {
+					System.err.printf("Peer[%s]: Received extension handshake response%n", remoteAddress);
+				}
+			}
+			
 			System.err.println("extension: %s".formatted(extension));
 
 			// Deserialize handshake content
@@ -239,24 +307,51 @@ public class Peer implements AutoCloseable {
 			}
 		}
 
-		// waitFor(Message.Bitfield.class, null);
-		// NEW:  wait until the reader thread sets the bitfield flag
-		while(!bitfield){
-			// check receive queue for bitfield msg
-			var msg = receiveQueue.poll();
-			if(msg instanceof Message.Bitfield bf){
-				handleMessage(bf); // process it
-				break;
+		// Check if bitfield was already received (might have arrived before we got here)
+		if (bitfield) {
+			if (BitTorrentApplication.DEBUG) {
+				System.err.printf("Peer[%s]: Bitfield already received, proceeding%n", remoteAddress);
 			}
-			if(msg != null){
-				receiveQueue.addFirst(msg); // put it back
-			}
-
-			Thread.sleep(100); // Poll
+			return; // Bitfield already received, we're done
 		}
+		
+		// Check receive queue for bitfield msg first
+		var queueIter = receiveQueue.iterator();
+		while (queueIter.hasNext()) {
+			var msg = queueIter.next();
+			if (msg instanceof Message.Bitfield bf) {
+				handleMessage(bf); // This sets bitfield = true
+				queueIter.remove();
+				if (BitTorrentApplication.DEBUG) {
+					System.err.printf("Peer[%s]: Found bitfield in queue, proceeding%n", remoteAddress);
+				}
+				return; // Found bitfield in queue, we're done
+			}
+		}
+		
+		// If still no bitfield, wait for it using waitFor (which properly blocks)
+		if (BitTorrentApplication.DEBUG) {
+			System.err.printf("Peer[%s]: Waiting for bitfield...%n", remoteAddress);
+		}
+		var bitfieldMsg = waitFor(Message.Bitfield.class, null);
+		handleMessage(bitfieldMsg); // This sets bitfield = true
 
 		// Send our bitfield to the peer to let them know what pieces we have
 		sendOurBitfield();
+		
+		// Send initial PEX update after connection is established and extensions are negotiated
+		// This helps peers discover each other immediately, not just after 30 seconds
+		if (pexExtensionId >= 0) {
+			try {
+				// Wait a moment for the connection to stabilize
+				Thread.sleep(1000);
+				sendPexUpdate();
+			} catch (Exception e) {
+				if (BitTorrentApplication.DEBUG) {
+					System.err.printf("Peer[%s]: failed to send initial PEX update: %s%n", remoteAddress, e.getMessage());
+				}
+			}
+		}
 	}
 
 	/**
@@ -384,35 +479,132 @@ public class Peer implements AutoCloseable {
 	}
 
 	/**
-	 * Sends a simple PEX update with the peers currently known for this
-	 * torrent, if the PEX extension has been negotiated.
+	 * Sends a PEX update with the specified added and dropped peers.
+	 * If parameters are null, automatically determines peers from SwarmManager.
 	 */
-	public void sendPexUpdate() throws IOException {
-		if (pexExtensionId < 0) {
+	public void sendPexUpdate(List<InetSocketAddress> added, List<InetSocketAddress> dropped) throws IOException {
+		if (pexExtensionId < 0 || closed) {
 			return;
 		}
 
-		var swarm = SwarmManager.getInstance();
-		// For now we don't distinguish added vs dropped; we just share the
-		// current known peers as "added".
-		var known = swarm.acquirePeers(infoHashHex, 50);
-		if (known.isEmpty()) {
+		// If parameters are null, get peers from SwarmManager
+		if (added == null && dropped == null) {
+			var swarm = SwarmManager.getInstance();
+			
+			// Create exclusion set: current peer and our own listen address
+			Set<InetSocketAddress> excludeAddresses = new HashSet<>();
+			excludeAddresses.add(remoteAddress);
+			
+			// Exclude our own listen address (from socket's local address)
+			InetSocketAddress localAddress = (InetSocketAddress) socket.getLocalSocketAddress();
+			if (localAddress != null) {
+				excludeAddresses.add(localAddress);
+			}
+			
+			added = swarm.getPeersForPex(infoHashHex, excludeAddresses, 50);
+			dropped = swarm.getDroppedPeers(infoHashHex, 50);
+		}
+
+		if ((added == null || added.isEmpty()) && (dropped == null || dropped.isEmpty())) {
 			return;
 		}
 
-		var pex = new PexMessage.Pex(known, java.util.Collections.emptyList());
+		if (added == null) {
+			added = Collections.emptyList();
+		}
+		if (dropped == null) {
+			dropped = Collections.emptyList();
+		}
+
+		var pex = new PexMessage.Pex(added, dropped);
 
 		send(new Message.Extension(
 			(byte) pexExtensionId,
 			pex
-		));
+		), extensionContext);
+
+		if (BitTorrentApplication.DEBUG) {
+			System.err.printf("Peer[%s]: sent PEX update (added: %d, dropped: %d)%n",
+				remoteAddress, added.size(), dropped.size());
+		}
+	}
+
+	/**
+	 * Sends a PEX update with peers from SwarmManager (backward compatibility).
+	 */
+	public void sendPexUpdate() throws IOException {
+		sendPexUpdate(null, null);
+	}
+
+	/**
+	 * Gets the remote address of this peer connection.
+	 */
+	public InetSocketAddress getRemoteAddress() {
+		return remoteAddress;
+	}
+
+	/**
+	 * Checks if this peer connection is closed.
+	 */
+	public boolean isClosed() {
+		return closed || socket.isClosed();
+	}
+
+	/**
+	 * Runs periodic PEX updates.
+	 */
+	private void runPexUpdateLoop() {
+		try {
+			// Wait a bit before first update to let connection stabilize
+			Thread.sleep(10_000); // 10 seconds
+
+			while (!closed && !socket.isClosed() && !Thread.currentThread().isInterrupted()) {
+				try {
+					// Only send if PEX is negotiated
+					if (pexExtensionId >= 0) {
+						sendPexUpdate();
+					}
+				} catch (IOException e) {
+					if (BitTorrentApplication.DEBUG) {
+						System.err.printf("Peer[%s]: error sending PEX update: %s%n", remoteAddress, e.getMessage());
+					}
+					// If we can't send, the connection might be broken
+					break;
+				}
+
+				// Wait for next update interval
+				Thread.sleep(PEX_UPDATE_INTERVAL_MS);
+			}
+		} catch (InterruptedException e) {
+			// Thread interrupted, exit
+			Thread.currentThread().interrupt();
+		} catch (Exception e) {
+			if (BitTorrentApplication.DEBUG) {
+				System.err.printf("Peer[%s]: error in PEX update loop: %s%n", remoteAddress, e.getMessage());
+			}
+		}
 	}
 
 	@Override
 	public void close() throws IOException, InterruptedException {
-		readerThread.interrupt(); // Stop the reader thread
+		closed = true;
+		
+		// Unregister from PeerConnectionManager
+		PeerConnectionManager.getInstance().unregisterConnection(infoHashHex, this);
+		
+		// Unregister from SwarmManager
+		SwarmManager.getInstance().unregisterActivePeer(infoHashHex, remoteAddress);
+		
+		// Stop threads
+		readerThread.interrupt();
+		pexUpdateThread.interrupt();
+		
+		// Close socket
 		socket.close();
-		readerThread.join(2000); // wait for thread to die.
+		
+		// Wait for threads to die
+		readerThread.join(2000);
+		pexUpdateThread.join(2000);
 	}
 
 	public static Peer connect(InetSocketAddress address, Announceable announceable, TorrentInfo torrentInfo, File file, String peerId) throws IOException {
@@ -424,7 +616,8 @@ public class Peer implements AutoCloseable {
 
 	public static Peer connect(Socket socket, Announceable announceable, TorrentInfo torrentInfo, File file, String peerId) throws IOException {
 		final var infoHash = announceable.getInfoHash();
-		final var padding = announceable instanceof Magnet ? PADDING_MAGNET_8 : PADDING_8;
+		// Always advertise extension support (bit 5 = 0x10) for PEX to work
+		final var padding = PADDING_MAGNET_8; // Use extension-enabled padding for all connections
 
 		try {
 			final var inputStream = new DataInputStream(socket.getInputStream());
@@ -533,7 +726,22 @@ public class Peer implements AutoCloseable {
 	
 				// 2. Read type and deserialize
 				final var typeId = length != 0 ? dataInputStream.readByte() : (byte) -1;
-				final var descriptor = MessageDescriptors.getByTypeId(typeId);
+				
+				MessageDescriptor<?> descriptor;
+				try {
+					descriptor = MessageDescriptors.getByTypeId(typeId);
+				} catch (IllegalArgumentException e) {
+					// Unknown message type - skip this message
+					if (BitTorrentApplication.DEBUG) {
+						System.err.printf("Peer[%s]: Unknown message type id: %d (length: %d), skipping%n", 
+							remoteAddress, typeId & 0xFF, length);
+					}
+					// Skip the remaining bytes of this message
+					if (length > 1) {
+						dataInputStream.skipBytes(length - 1);
+					}
+					continue;
+				}
 
 				MessageSerialContext context = null;
 				if (descriptor.typeId() == MessageDescriptors.EXTENSION.typeId()) {
@@ -554,6 +762,11 @@ public class Peer implements AutoCloseable {
 
 				// 4. Pass to message handler
 				handleMessage(message);
+				
+				// Notify any threads waiting for messages
+				synchronized (receiveQueue) {
+					receiveQueue.notifyAll();
+				}
 			}
 		} catch (EOFException | PeerClosedException e) {
 			if (BitTorrentApplication.DEBUG) {
@@ -562,6 +775,16 @@ public class Peer implements AutoCloseable {
 		} catch (IOException e) {
 			if (!socket.isClosed()) {
 				System.err.println("Error in peer reader loop: " + e.getMessage());
+			}
+		} catch (RuntimeException e) {
+			// Catch runtime exceptions (like IllegalArgumentException from getByTypeId)
+			// Log but don't crash - the connection might still be valid
+			if (BitTorrentApplication.DEBUG) {
+				System.err.printf("Peer[%s]: Error in reader loop: %s%n", remoteAddress, e.getMessage());
+			}
+			// If it's a deserialization error, the connection might be corrupted, so close it
+			if (e.getCause() instanceof IOException) {
+				closeQuietly();
 			}
 		} finally {
 			closeQuietly();
@@ -588,13 +811,51 @@ public class Peer implements AutoCloseable {
 			handlePieceRequest(request);
 		} else if (message instanceof Message.Bitfield) {
 			// This is for our download. Store it.
-			this.bitfield = true; 
+			this.bitfield = true;
+			// Only add to queue if awaitBitfield() hasn't completed yet
+			// (it will check the bitfield flag first)
 			receiveQueue.add(message); // Also add to queue for awaitBitfield()
 		} else if (message instanceof Message.Extension extension) {
 			// Extension messages can be metadata (handshake / data) or PEX.
 			byte extId = extension.id();
 
+			// Handle extension handshake (id=0) - this sets extension IDs
+			if (extId == 0) {
+				// Process extension handshake to set extension IDs
+				try {
+					@SuppressWarnings("unchecked")
+					var objects = (java.util.List<Object>) extension.content();
+					var metadata = bittorrent.peer.serial.extension.MetadataMessageSerial.deserialize(objects);
+					if (metadata instanceof MetadataMessage.Handshake handshake) {
+						var ids = handshake.extensionIds();
+						if (ids.containsKey("ut_metadata")) {
+							metadataExtensionId = ids.get("ut_metadata");
+							extensionContext.registerExtension((byte) metadataExtensionId, "ut_metadata");
+						}
+						if (ids.containsKey("ut_pex")) {
+							pexExtensionId = ids.get("ut_pex");
+							extensionContext.registerExtension((byte) pexExtensionId, "ut_pex");
+						}
+						if (BitTorrentApplication.DEBUG) {
+							System.err.printf("Peer[%s]: processed extension handshake (metadata=%d, pex=%d)%n",
+								remoteAddress, metadataExtensionId, pexExtensionId);
+						}
+						// Also queue for awaitBitfield() if it's waiting
+						receiveQueue.add(extension);
+						return;
+					}
+				} catch (Exception e) {
+					if (BitTorrentApplication.DEBUG) {
+						System.err.printf("Peer[%s]: error processing extension handshake: %s%n", remoteAddress, e.getMessage());
+					}
+					// Still queue it so awaitBitfield() can handle it
+					receiveQueue.add(extension);
+					return;
+				}
+			}
+
 			// During initial handshake we just queue the message for awaitBitfield()
+			// This handles the case where extension IDs aren't set yet
 			if (metadataExtensionId == -1 && pexExtensionId == -1) {
 				receiveQueue.add(extension);
 				return;
@@ -609,7 +870,42 @@ public class Peer implements AutoCloseable {
 				var pex = bittorrent.peer.serial.extension.PexMessageSerial.deserialize(objects);
 
 				if (pex instanceof PexMessage.Pex pexMsg) {
-					SwarmManager.getInstance().onPexPeersDiscovered(infoHashHex, pexMsg.added());
+					if (BitTorrentApplication.DEBUG) {
+						int addedCount = pexMsg.added() != null ? pexMsg.added().size() : 0;
+						int droppedCount = pexMsg.dropped() != null ? pexMsg.dropped().size() : 0;
+						System.err.printf("Peer[%s]: received PEX update (added: %d, dropped: %d)%n",
+							remoteAddress, addedCount, droppedCount);
+					}
+					
+					// Add discovered peers to SwarmManager
+					// Only broadcast peers that were actually NEW (not already known)
+					if (pexMsg.added() != null && !pexMsg.added().isEmpty()) {
+						// Get list of peers that were actually new (before adding)
+						var swarm = SwarmManager.getInstance();
+						List<InetSocketAddress> newPeers = new ArrayList<>();
+						for (InetSocketAddress addr : pexMsg.added()) {
+							// Check if peer was already known before adding
+							if (!swarm.isPeerKnown(infoHashHex, addr)) {
+								newPeers.add(addr);
+							}
+						}
+						
+						// Add all peers to SwarmManager
+						swarm.onPexPeersDiscovered(infoHashHex, pexMsg.added());
+						
+						// Only broadcast peers that were actually new (to avoid loops)
+						if (!newPeers.isEmpty()) {
+							PeerConnectionManager.getInstance().broadcastNewPeers(infoHashHex, newPeers);
+						}
+					}
+					
+					// Handle dropped peers
+					if (pexMsg.dropped() != null && !pexMsg.dropped().isEmpty()) {
+						// Mark peers as dropped in SwarmManager
+						for (InetSocketAddress addr : pexMsg.dropped()) {
+							SwarmManager.getInstance().unregisterActivePeer(infoHashHex, addr);
+						}
+					}
 				}
 			} else {
 				// Unknown extension ID for this connection – ignore for now.

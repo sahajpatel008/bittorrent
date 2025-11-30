@@ -24,6 +24,7 @@ import bittorrent.bencode.BencodeDeserializer;
 import bittorrent.bencode.BencodeSerializer;
 import bittorrent.config.BitTorrentConfig;
 import bittorrent.peer.Peer;
+import bittorrent.peer.PeerConnectionManager;
 import bittorrent.peer.SwarmManager;
 import bittorrent.peer.PeerServer;
 import bittorrent.torrent.Torrent;
@@ -73,6 +74,13 @@ public class BitTorrentService {
 		final var decoded = new BencodeDeserializer(content).parse();
 
 		return Torrent.of((Map<String, Object>) decoded);
+	}
+
+	/**
+	 * Public method to load a torrent file (for use by controllers)
+	 */
+	public Torrent loadTorrent(String path) throws IOException {
+		return load(path);
 	}
 
 	private String infoToString(String trackerUrl, TorrentInfo info) {
@@ -131,10 +139,9 @@ public class BitTorrentService {
 				// Similar logic
 				if (args.length >= 4) {
 					String outputPath = args[2];
-					File downloaded = downloadFile(args[3]);
-					Files.copy(downloaded.toPath(), Paths.get(outputPath), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-					downloaded.delete();
-					System.out.println("Downloaded to: " + outputPath);
+					String torrentPath = args[3];
+					// Download directly to final location and continue seeding
+					downloadFileAndSeed(torrentPath, outputPath);
 				}
 			}
 			case "seed" -> seed(args[1], args[2]); // seed <torrent> <filePath>
@@ -289,6 +296,119 @@ public class BitTorrentService {
         }
 	}
 
+	/**
+	 * Downloads a file and continues seeding. This is used by CLI when leechers should become seeders.
+	 */
+	public void downloadFileAndSeed(String torrentPath, String outputPath) throws IOException, InterruptedException {
+		final var torrent = load(torrentPath);
+		final var torrentInfo = torrent.info();
+		final var finalFile = new File(outputPath);
+
+		// Register the final file with PeerServer from the start
+		peerServer.registerTorrent(torrentInfo, finalFile);
+
+		final String infoHashHex = hexFormat.formatHex(torrentInfo.hash());
+		final SwarmManager swarmManager = SwarmManager.getInstance();
+
+		// 1) Ensure we have some peers in the swarm. Prefer tracker when we
+		// have too few known peers, otherwise rely on PEX / existing state.
+		final int MIN_KNOWN_PEERS = 3;
+		java.util.List<java.net.InetSocketAddress> candidatePeers =
+			swarmManager.acquirePeers(infoHashHex, MIN_KNOWN_PEERS);
+
+		if (candidatePeers.size() < MIN_KNOWN_PEERS) {
+			final var response = trackerClient.announce(torrent);
+			final var trackerPeers = response.peers().stream()
+				.filter(p -> p.getPort() != config.getListenPort()) // avoid connecting to ourselves
+				.toList();
+
+			if (trackerPeers.isEmpty() && candidatePeers.isEmpty()) {
+				System.out.println("No other peers returned by tracker or PEX.");
+				return;
+			}
+
+			swarmManager.registerTrackerPeers(infoHashHex, trackerPeers, config.getListenPort());
+			candidatePeers = swarmManager.acquirePeers(
+				infoHashHex,
+				Math.min(5, Math.max(MIN_KNOWN_PEERS, trackerPeers.size()))
+			);
+			
+			// Broadcast new peers via PEX to all connected peers
+			if (!trackerPeers.isEmpty()) {
+				PeerConnectionManager.getInstance().broadcastNewPeers(infoHashHex, trackerPeers);
+			}
+		}
+
+		// 2) Connect to a small number of peers in parallel
+		final int maxPeers = Math.min(3, candidatePeers.size());
+
+		if (candidatePeers.isEmpty() || maxPeers == 0) {
+			System.out.println("No candidate peers available for connection.");
+			return;
+		}
+
+		final var peers = new java.util.ArrayList<Peer>();
+		try {
+			for (var addr : candidatePeers) {
+				try {
+					// Use final file (not temp) so peers can serve pieces after download
+					var peer = Peer.connect(addr, torrent, torrentInfo, finalFile, config.getPeerId());
+					peers.add(peer);
+					swarmManager.registerActivePeer(infoHashHex, addr);
+				} catch (IOException e) {
+					System.err.println("Failed to connect to peer " + addr + ": " + e.getMessage());
+					// Mark as dropped if connection fails
+					swarmManager.unregisterActivePeer(infoHashHex, addr);
+				}
+			}
+
+			if (peers.isEmpty()) {
+				System.out.println("Could not connect to any peers.");
+				return;
+			}
+
+			// 3) Very simple multi-peer scheduler: assign pieces round-robin
+			final int pieceCount = torrentInfo.pieces().size();
+			final var pieceData = new byte[pieceCount][];
+
+			for (int pieceIndex = 0; pieceIndex < pieceCount; pieceIndex++) {
+				// Pick a peer in round-robin fashion
+				Peer peer = peers.get(pieceIndex % peers.size());
+				byte[] data = peer.downloadPiece(torrentInfo, pieceIndex);
+				pieceData[pieceIndex] = data;
+			}
+
+			// 4) Write all pieces to the final file
+			try (final var fileOutputStream = new FileOutputStream(finalFile)) {
+				for (int i = 0; i < pieceCount; i++) {
+					fileOutputStream.write(pieceData[i]);
+				}
+			}
+
+			// Inform tracker that we now have the full file (left=0)
+			trackerClient.announce(torrent, config.getListenPort(), 0L);
+			
+			System.out.println("Downloaded to: " + outputPath);
+			System.out.println("Download complete. Now seeding... (press Ctrl+C to stop)");
+
+			// Don't close peer connections - keep them alive for PEX and seeding
+			// The peers will remain active and continue exchanging PEX updates
+			// They will be closed when the process exits or when explicitly closed
+
+			// Keep process alive to accept incoming connections and process PEX updates
+			Thread.currentThread().join();
+		} catch (Exception e) {
+			// On error, close peers
+			for (int i = 0; i < peers.size(); i++) {
+				Peer p = peers.get(i);
+				try {
+					p.close();
+				} catch (Exception ignored) {}
+			}
+			throw e;
+		}
+	}
+
 	// Changed to return File to match Controller expectation (Controller expects FileSystemResource... wait, 
     // I changed Controller to use FileSystemResource for downloadFile and ByteArrayResource for downloadPiece.
 	public File downloadFile(String path) throws IOException, InterruptedException {
@@ -323,6 +443,11 @@ public class BitTorrentService {
 				infoHashHex,
 				Math.min(5, Math.max(MIN_KNOWN_PEERS, trackerPeers.size()))
 			);
+			
+			// Broadcast new peers via PEX to all connected peers
+			if (!trackerPeers.isEmpty()) {
+				PeerConnectionManager.getInstance().broadcastNewPeers(infoHashHex, trackerPeers);
+			}
 		}
 
 		// 2) Connect to a small number of peers in parallel
@@ -340,8 +465,14 @@ public class BitTorrentService {
 					var peer = Peer.connect(addr, torrent, torrentInfo, tempFile, config.getPeerId());
 					peers.add(peer);
 					swarmManager.registerActivePeer(infoHashHex, addr);
+					
+					// Send initial PEX update after connection is established
+					// This will happen automatically via the periodic thread, but we can also trigger it
+					// after a short delay to let the connection stabilize
 				} catch (IOException e) {
 					System.err.println("Failed to connect to peer " + addr + ": " + e.getMessage());
+					// Mark as dropped if connection fails
+					swarmManager.unregisterActivePeer(infoHashHex, addr);
 				}
 			}
 
@@ -370,16 +501,23 @@ public class BitTorrentService {
 
 			// Inform tracker that we now have the full file (left=0)
 			trackerClient.announce(torrent, config.getListenPort(), 0L);
+			
+			System.out.println("Download complete. Continuing to seed...");
+
+			// Don't close peer connections - keep them alive for PEX and seeding
+			// The peers will remain active and continue exchanging PEX updates
+			// They will be closed when the process exits or when explicitly closed
 
 			return tempFile;
-		} finally {
-			// Close peers and unregister active entries
+		} catch (Exception e) {
+			// On error, close peers
 			for (int i = 0; i < peers.size(); i++) {
 				Peer p = peers.get(i);
 				try {
 					p.close();
 				} catch (Exception ignored) {}
 			}
+			throw e;
 		}
 	}
 }
