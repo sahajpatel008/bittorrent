@@ -25,7 +25,11 @@ Request         Business Logic      Peer/Tracker         TCP/HTTP
 bittorrent/
 ├── controller/          REST endpoints (user-facing API)
 ├── service/             Business logic orchestration
-│   └── DownloadJob.java  Download job tracking for async operations
+│   ├── BitTorrentService.java      Main service orchestrating operations
+│   ├── DownloadJob.java            Download job tracking for async operations
+│   ├── TorrentProgressService.java Real-time progress updates via SSE
+│   └── storage/                     Persistence services
+│       └── TorrentPersistenceService.java  State persistence (torrents, jobs, seeding)
 ├── torrent/             Data models (Torrent, TorrentInfo)
 ├── tracker/             Tracker communication (get peer list)
 ├── peer/                Peer protocol implementation (download pieces)
@@ -33,7 +37,8 @@ bittorrent/
 │   ├── PeerServer.java      Listens for incoming peer connections (port 6881)
 │   ├── SwarmManager.java    Manages known/active/dropped peers per torrent
 │   ├── PeerConnectionManager.java  Manages active peer connections
-│   └── protocol/           BitTorrent protocol messages (including PEX)
+│   └── storage/            Persistence for peer state
+│       └── SwarmPersistenceService.java  Persists known peers (PEX)
 ├── bencode/             Bencode serialization/deserialization
 ├── magnet/              Magnet link support
 └── util/                SHA-1 hashing, network utilities
@@ -259,19 +264,24 @@ PeerConnectionManager: {
 **Key methods**:
 - `loadTorrent(String)`: Parse .torrent file
 - `downloadPiece(String, int)`: Download single piece from peers
-- `startDownload(String, String)`: Start async download job (returns job ID)
+- `startDownload(String, String)`: Start async download job (returns job ID, saves torrent file)
 - `getDownloadJob(String)`: Get download job status
 - `downloadFile(String)`: Legacy synchronous download (CLI compatibility)
-- `seed(String, String)`: Register file for seeding (non-blocking)
+- `seed(String, String)`: Register file for seeding (non-blocking, saves torrent file and state)
+- `loadPersistedState()`: Load and resume persisted downloads/seeding on startup
+- `saveState()`: Save download jobs state (called periodically)
 
 **Async Download Flow**:
 ```
 1. startDownload() creates DownloadJob with unique job ID
-2. Downloads processed in background via ExecutorService
-3. Progress tracked: completedPieces / totalPieces
-4. Files saved to ~/bittorrent-downloads/ (permanent storage)
-5. Peer connections closed after download completes
-6. File automatically registered for seeding via PeerServer
+2. Torrent file saved to ~/.bittorrent/torrents/ (persisted)
+3. Downloads processed in background via ExecutorService
+4. Progress tracked: completedPieces / totalPieces
+5. Download job state saved every 30 seconds
+6. Files saved to ~/bittorrent-downloads/ (permanent storage)
+7. Peer connections closed after download completes
+8. File automatically registered for seeding via PeerServer
+9. Seeding state saved to ~/.bittorrent/seeding_torrents.json
 ```
 
 **DownloadJob** (`service/DownloadJob.java`):
@@ -283,8 +293,9 @@ PeerConnectionManager: {
 **Seeding Integration**:
 - After successful download, files are automatically registered with `peerServer.registerTorrent()`
 - Files saved to permanent location: `~/bittorrent-downloads/`
-- Seeding continues as long as Spring Boot application is running
-- Peer connections are properly cleaned up after downloads
+- Torrent file and seeding state saved to `~/.bittorrent/`
+- Seeding state persists across restarts and is automatically restored
+- On startup, all persisted seeding torrents are re-registered and re-announced to tracker
 
 ### 5. **BencodeDeserializer** (`bencode/`)
 **Purpose**: Parse .torrent files (bencoded format)
@@ -440,15 +451,15 @@ curl http://localhost:8080/api/torrents/download/{jobId}/status
 
 ✅ **Permanent file storage**: All downloads saved to `~/bittorrent-downloads/` directory, persisting across restarts.
 
+✅ **State persistence**: Torrent files, download jobs, and seeding state are automatically persisted and restored on restart.
+
+✅ **Resume capability**: Download jobs automatically resume from last progress after server restart.
+
 ✅ **Peer connection tracking**: `PeerConnectionManager` tracks active connections and facilitates PEX broadcasting.
 
-✅ **Swarm management**: `SwarmManager` tracks known, active, and dropped peers per torrent (thread-safe).
+✅ **Swarm management**: `SwarmManager` tracks known, active, and dropped peers per torrent (thread-safe, with persistence).
 
 ## Missing Implementations (TODOs)
-
-1.  **Resume capability**: No state persistence for partial downloads. If app restarts, must start over.
-
-2.  **Persistent seeding state**: Seeding state is lost on app restart. Need to save/restore registered torrents on startup.
 
 3.  **Multi-file torrent support**: Only single-file torrents work. Need `FileManager` abstraction for multi-file torrents.
 
@@ -460,34 +471,42 @@ curl http://localhost:8080/api/torrents/download/{jobId}/status
 
 ---
 
+## State Persistence
+
+### TorrentPersistenceService
+**Purpose**: Persists torrent files, download jobs, and seeding state to disk.
+
+**Storage Locations**:
+- Torrent files: `~/.bittorrent/torrents/{infoHash}.torrent`
+- Download jobs: `~/.bittorrent/download_jobs.json`
+- Seeding torrents: `~/.bittorrent/seeding_torrents.json`
+
+**Features**:
+- Automatic saving every 30 seconds for download jobs
+- Immediate save on torrent registration/seeding
+- Automatic loading on startup (`@PostConstruct`)
+- Graceful error handling (skips missing files)
+
+**Resume Flow**:
+1. On startup, `BitTorrentService.init()` calls `loadPersistedState()`
+2. Loads download jobs from JSON, verifies files exist
+3. Resumes downloads from last completed piece
+4. Loads seeding torrents, re-registers with `PeerServer`
+5. Re-announces all resumed torrents to tracker
+
+### SwarmPersistenceService
+**Purpose**: Persists known peers discovered via PEX.
+
+**Storage**: `~/.bittorrent/known_peers.json`
+
+**Features**:
+- Saves known peers per torrent
+- Loads on startup to bootstrap peer discovery
+- Periodic saves (every 5 minutes)
+
 ## Next Steps (Prioritized Roadmap)
 
 ### Phase 1: Enhancements (Future)
-
-#### 1. Persistent Seeding State
-**Problem**: Seeding state lost on app restart.
-
-**Implementation**:
-- Create `SeedingStateManager` class
-- Save registered torrents to JSON file (`seedingState.json`)
-- Load on startup in `@PostConstruct`
-- Verify files exist before re-registering
-- Auto-save on torrent registration
-
-**Files to create**: `SeedingStateManager.java`  
-**Files to modify**: `BitTorrentService.java`, `PeerServer.java`
-
-#### 2. Resume Capability
-**Problem**: No state persistence for partial downloads.
-
-**Implementation**:
-- Save download progress to disk (piece bitfield)
-- On restart, check for partial files
-- Resume from last completed piece
-- Update `DownloadJob` to support resume
-
-**Files to create**: `DownloadStateManager.java`
-**Files to modify**: `BitTorrentService.java`, `DownloadJob.java`
 
 ---
 

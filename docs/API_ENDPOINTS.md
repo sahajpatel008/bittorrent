@@ -30,7 +30,7 @@ Returns API status.
 ### 2. Get Torrent Information
 **POST** `/api/torrents/info`
 
-Parses a `.torrent` file and returns metadata as JSON.
+Parses a `.torrent` file and returns metadata as JSON. The torrent file is automatically saved to persistent storage.
 
 **Request:**
 - Content-Type: `multipart/form-data`
@@ -47,6 +47,8 @@ Parses a `.torrent` file and returns metadata as JSON.
   "infoHash": "5c03506aa73be7824eac651d0980bcdb912cfa81"
 }
 ```
+
+**Note:** The torrent file is saved to `~/.bittorrent/torrents/{infoHash}.torrent` for persistence.
 
 ---
 
@@ -90,7 +92,10 @@ Starts an asynchronous download job. Returns immediately with a job ID. The down
 }
 ```
 
-**Note:** Downloads are saved to `~/bittorrent-downloads/` directory. Files persist across server restarts.
+**Note:** 
+- Downloads are saved to `~/bittorrent-downloads/` directory. Files persist across server restarts.
+- The torrent file is automatically saved to persistent storage.
+- Download jobs are automatically saved and can be resumed after server restart.
 
 ---
 
@@ -180,7 +185,10 @@ Registers a torrent file and data file for seeding. The data file is saved to a 
 }
 ```
 
-**Note:** The data file is automatically saved to `~/bittorrent-downloads/` directory. Seeding continues as long as the server is running.
+**Note:** 
+- The data file is automatically saved to `~/bittorrent-downloads/` directory.
+- The torrent file is automatically saved to persistent storage.
+- Seeding state is persisted and will resume automatically after server restart.
 
 ---
 
@@ -295,7 +303,13 @@ Error responses follow this format:
    - Poll status: `GET /api/torrents/download/{jobId}/status`
    - Download file when completed: `GET /api/torrents/download/{jobId}/file`
 
-4. **File Storage**: All downloaded and seeded files are saved to `~/bittorrent-downloads/` directory and persist across server restarts.
+4. **File Storage**: 
+   - Downloaded and seeded files: `~/bittorrent-downloads/` directory
+   - Torrent files: `~/.bittorrent/torrents/` directory
+   - Download jobs state: `~/.bittorrent/download_jobs.json`
+   - Seeding torrents state: `~/.bittorrent/seeding_torrents.json`
+   - Known peers (PEX): `~/.bittorrent/known_peers.json`
+   - All state persists across server restarts and is automatically restored on startup.
 
 5. **Seeding**: After downloading a file, it automatically starts seeding. Use the status endpoint to check seeding status.
 

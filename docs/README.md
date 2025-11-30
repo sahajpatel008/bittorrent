@@ -53,7 +53,6 @@ BITTORRENT-JAVA/
 ## ⚠️ Current Limitations
 
 *   **Single File Mode Only**: This client currently supports only single-file torrents. It assumes the `.torrent` metadata describes a single file structure. Multi-file torrents (containing a `files` list in the info dictionary) are not yet supported and may cause the download to fail or behave unexpectedly.
-*   **Seeding Lifetime**: The client will seed downloaded files only while the Spring Boot application is running. There is no persistent state management across restarts (though files are saved to permanent storage).
 
 ## ✅ Features
 
@@ -64,6 +63,8 @@ BITTORRENT-JAVA/
 *   **Peer Exchange (PEX)**: Supports PEX protocol for decentralized peer discovery, reducing dependency on trackers.
 *   **Multi-Peer Downloads**: Downloads pieces from multiple peers in parallel using round-robin scheduling.
 *   **Permanent File Storage**: All downloaded files are saved to `~/bittorrent-downloads/` and persist across server restarts.
+*   **State Persistence**: Torrent files, download jobs, and seeding state are automatically persisted and restored on restart.
+*   **Resume Capability**: Download jobs automatically resume from last progress after server restart.
 *   **Thread-Safe Operations**: All shared data structures use thread-safe collections for concurrent access.
 
 ## ⚙️ Configuration
@@ -76,7 +77,10 @@ The client can be configured via `src/main/resources/application.properties`. Ke
 | `bittorrent.listen-port` | `6881` | Port for incoming peer connections |
 | `server.port` | `8080` | HTTP API server port |
 
-**Note**: Downloaded files are automatically saved to `~/bittorrent-downloads/` directory.
+**Note**: 
+- Downloaded files are automatically saved to `~/bittorrent-downloads/` directory.
+- Torrent files, download jobs, and seeding state are persisted in `~/.bittorrent/` directory.
+- All state is automatically restored on server restart.
 
 ## ⚙️ How to Run (Development)
 
@@ -182,12 +186,19 @@ The backend is **production-ready** for frontend integration:
 ✅ **Resource management** - Proper cleanup of connections and files  
 ✅ **Thread safety** - All shared data structures are thread-safe  
 ✅ **Error handling** - Proper error responses and exception handling  
-✅ **File persistence** - Files saved to permanent locations  
+✅ **State persistence** - Torrent files, download jobs, and seeding state persist across restarts  
+✅ **Resume capability** - Downloads automatically resume from last progress  
 ✅ **Scalability** - Can handle multiple concurrent requests  
 
 ## 📝 Notes
 
 - **File Storage**: All downloads are saved to `~/bittorrent-downloads/` directory
-- **Seeding**: After downloading, files automatically start seeding
+- **State Persistence**: 
+  - Torrent files: `~/.bittorrent/torrents/`
+  - Download jobs: `~/.bittorrent/download_jobs.json`
+  - Seeding torrents: `~/.bittorrent/seeding_torrents.json`
+  - Known peers (PEX): `~/.bittorrent/known_peers.json`
+- **Seeding**: After downloading, files automatically start seeding and persist across restarts
 - **PEX**: Peer Exchange is enabled by default and helps discover peers without relying solely on trackers
 - **Async Downloads**: Downloads are processed asynchronously to prevent HTTP timeouts
+- **Auto-Resume**: All active downloads and seeding torrents are automatically restored on server restart
