@@ -37,8 +37,21 @@ public class TrackerClient {
 		this.listenPort = (short) listenPort;
 	}
 
-	@SuppressWarnings("unchecked")
 	public AnnounceResponse announce(Announceable announceable) throws IOException {
+		return announce(announceable, listenPort, announceable.getInfoLength());
+	}
+
+	@SuppressWarnings("unchecked")
+	public AnnounceResponse announce(Announceable announceable, int port) throws IOException {
+		return announce(announceable, port, announceable.getInfoLength());
+	}
+
+	/**
+	 * Announces with an explicit 'left' value so the tracker can know how much of
+	 * the file this peer still needs (0 means completed / seeding).
+	 */
+	@SuppressWarnings("unchecked")
+	public AnnounceResponse announce(Announceable announceable, int port, long left) throws IOException {
 		final var trackerUrl = announceable.getTrackerUrl();
 		System.out.println("Attempting to pass tracker url : " + trackerUrl);
 
@@ -60,10 +73,10 @@ public class TrackerClient {
 					.newBuilder()
 					.addEncodedQueryParameter("info_hash", DigestUtils.urlEncode(announceable.getInfoHash()))
 					.addQueryParameter("peer_id", peerId)
-					.addQueryParameter("port", String.valueOf(listenPort))
+					.addQueryParameter("port", String.valueOf(port))
 					.addQueryParameter("uploaded", "0")
-					.addQueryParameter("downloaded", "0")
-					.addQueryParameter("left", String.valueOf(announceable.getInfoLength()))
+					.addQueryParameter("downloaded", String.valueOf(announceable.getInfoLength() - left))
+					.addQueryParameter("left", String.valueOf(left))
 					.addQueryParameter("compact", "1")
 					.build()
 			)

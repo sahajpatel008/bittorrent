@@ -1,6 +1,7 @@
 package bittorrent.peer.serial;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
@@ -8,7 +9,10 @@ import bittorrent.bencode.BencodeDeserializer;
 import bittorrent.bencode.BencodeSerializer;
 import bittorrent.peer.protocol.Message;
 import bittorrent.peer.protocol.MetadataMessage;
+import bittorrent.peer.protocol.PexMessage;
+import bittorrent.peer.serial.extension.ExtensionRegistry;
 import bittorrent.peer.serial.extension.MetadataMessageSerial;
+import bittorrent.peer.serial.extension.PexMessageSerial;
 import lombok.experimental.UtilityClass;
 
 @UtilityClass
@@ -205,12 +209,29 @@ public class MessageDescriptors {
 		(message, output, context) -> {
 			final byte[] serializedContent;
 
-			final var extensionType = context.extensionType();
-			if (MetadataMessage.class.equals(extensionType)) {
-				final var content = MetadataMessageSerial.serialize((MetadataMessage) message.content());
-				serializedContent = new BencodeSerializer().writeAsBytes(content);
-			} else {
-				throw new UnsupportedOperationException("unknown extension: %s".formatted(extensionType.getName()));
+			final Object payload = message.content();
+
+			try {
+				// Prefer registry-based lookup if possible
+				var registryCodec = ExtensionRegistry.getByPayload(payload);
+				if (registryCodec != null) {
+					@SuppressWarnings("unchecked")
+					Map<String, ?> map = registryCodec.serialize(payload);
+					serializedContent = new BencodeSerializer().writeAsBytes(map);
+				} else if (payload instanceof MetadataMessage metadataMessage) {
+					// Fallback for legacy metadata handling
+					final var content = MetadataMessageSerial.serialize(metadataMessage);
+					serializedContent = new BencodeSerializer().writeAsBytes(content);
+				} else if (payload instanceof PexMessage pexMessage) {
+					final var content = PexMessageSerial.serialize(pexMessage);
+					serializedContent = new BencodeSerializer().writeAsBytes(content);
+				} else {
+					throw new UnsupportedOperationException(
+						"Unknown extension payload type: " + payload.getClass().getName()
+					);
+				}
+			} catch (java.io.IOException e) {
+				throw new RuntimeException(e);
 			}
 
 			output.writeByte(message.id());
@@ -219,19 +240,21 @@ public class MessageDescriptors {
 			return 1 + 1 + serializedContent.length;
 		},
 		(payloadLength, input, context) -> {
-			final var id = input.readByte();
-			final var raw = input.readNBytes(payloadLength - 1);
-			System.err.println(new String(raw));
-			final var parsed = new BencodeDeserializer(raw).parseMultiple();
+			try {
+				final var id = input.readByte();
+				final var raw = input.readNBytes(payloadLength - 1);
+				System.err.println(new String(raw));
+				final var parsed = new BencodeDeserializer(raw).parseMultiple();
 
-			final var extensionType = context.extensionType();
-			if (MetadataMessage.class.equals(extensionType)) {
+				// Defer interpretation of payload to higher layers by returning
+				// the parsed bencode objects; Peer will decide which concrete
+				// extension type to use based on extension ID and handshake info.
 				return new Message.Extension(
 					id,
-					MetadataMessageSerial.deserialize(parsed)
+					parsed
 				);
-			} else {
-				throw new UnsupportedOperationException("unknown extension: %s".formatted(extensionType.getName()));
+			} catch (java.io.IOException e) {
+				throw new RuntimeException(e);
 			}
 		}
 	);

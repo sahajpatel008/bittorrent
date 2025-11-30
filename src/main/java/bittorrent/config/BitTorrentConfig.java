@@ -63,4 +63,14 @@ public class BitTorrentConfig {
      * Default tracker re-announce interval in seconds
      */
     private int trackerInterval = 1800;
+
+    // Explicit Getters to avoid Lombok issues during simple compilation
+    public String getPeerId() { return peerId; }
+    public void setPeerId(String peerId) { this.peerId = peerId; }
+    
+    public int getListenPort() { return listenPort; }
+    public void setListenPort(int listenPort) { this.listenPort = listenPort; }
+
+    public String getDownloadDir() { return downloadDir; }
+    public void setDownloadDir(String downloadDir) { this.downloadDir = downloadDir; }
 }

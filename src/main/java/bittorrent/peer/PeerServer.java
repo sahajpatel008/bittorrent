@@ -10,6 +10,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import bittorrent.peer.protocol.Message;
+import bittorrent.peer.protocol.MetadataMessage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -25,6 +27,8 @@ public class PeerServer {
 
     private static final byte[] PROTOCOL_BYTES = "BitTorrent protocol".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] PADDING_8 = new byte[8];
+    // PADDING with extension protocol bit set (bit 5 = 0x10)
+    private static final byte[] PADDING_EXTENSIONS = { 0, 0, 0, 0, 0, 0x10, 0, 0 };
 
     private final BitTorrentConfig config;
     private final ExecutorService executorService = Executors.newCachedThreadPool();
@@ -134,7 +138,7 @@ public class PeerServer {
             // 2. Send Handshake Response
             outputStream.write(19);
             outputStream.write(PROTOCOL_BYTES);
-            outputStream.write(PADDING_8); // We can support extensions later if needed
+            outputStream.write(PADDING_EXTENSIONS); // Advertise extension protocol support (bit 5 = 0x10)
             outputStream.write(infoHash);
             outputStream.write(config.getPeerId().getBytes(StandardCharsets.US_ASCII)); // Our Peer ID
 
@@ -142,12 +146,53 @@ public class PeerServer {
             File file = torrentFiles.get(infoHashHex);
             Peer peer = new Peer(peerId, socket, supportExtensions, torrentInfo, file);
             
-            // The Peer constructor starts the reader thread, so it's now active.
-            // We should probably keep track of this peer somewhere, but for now let it run.
+            // The Peer constructor starts the reader thread and registers with PeerConnectionManager
             System.out.println("Handshake successful with " + socket.getRemoteSocketAddress());
             
-            // Send our bitfield immediately
+            // Register active peer with SwarmManager
+            SwarmManager.getInstance().registerActivePeer(infoHashHex, 
+                (java.net.InetSocketAddress) socket.getRemoteSocketAddress());
+            
+            // Mark all pieces as present (we are a seeder for this torrent) and send our bitfield
+            peer.markAllPiecesPresent();
             peer.sendOurBitfield();
+            
+            // If extensions are supported, send extension handshake response
+            if (supportExtensions) {
+                try {
+                    // Send extension handshake to negotiate PEX and metadata extensions
+                    final Map<String, Integer> localExtensions = Map.of(
+                        "ut_metadata", 42,
+                        "ut_pex", 43
+                    );
+                    peer.send(
+                        new bittorrent.peer.protocol.Message.Extension(
+                            (byte) 0,
+                            new bittorrent.peer.protocol.MetadataMessage.Handshake(localExtensions)
+                        ),
+                        null
+                    );
+                    
+                } catch (IOException e) {
+                    if (BitTorrentApplication.DEBUG) {
+                        System.err.printf("PeerServer: failed to send extension handshake: %s%n", e.getMessage());
+                    }
+                }
+            }
+            
+            // Send initial PEX update after connection is established
+            // Wait a moment for extension negotiation to complete
+            new Thread(() -> {
+                try {
+                    Thread.sleep(2000); // Wait for extension handshake to complete
+                    // Try to send PEX update (will be skipped if extension not negotiated)
+                    peer.sendPexUpdate();
+                } catch (Exception e) {
+                    if (BitTorrentApplication.DEBUG) {
+                        System.err.printf("PeerServer: failed to send initial PEX update: %s%n", e.getMessage());
+                    }
+                }
+            }).start();
             
         } catch (IOException e) {
             System.err.println("Error handling connection: " + e.getMessage());
