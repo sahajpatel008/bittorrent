@@ -7,7 +7,11 @@ import bittorrent.util.NetworkUtils;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -109,6 +113,72 @@ public class TrackerController {
             map.put("port", peer.port());
             return map;
         }).toList();
+    }
+
+    /**
+     * Manually register a peer in the tracker (REST API for testing/bootstrap)
+     * POST /api/tracker/swarms/{infoHash}/peers
+     * Body: { "ip": "192.168.1.1", "port": 6881, "peerId": "optional-peer-id" }
+     */
+    @PostMapping("/api/tracker/swarms/{infoHash}/peers")
+    public ResponseEntity<Map<String, Object>> registerPeer(
+            @PathVariable String infoHash,
+            @RequestBody Map<String, Object> peerData) {
+        try {
+            String ip = (String) peerData.get("ip");
+            Number portNum = (Number) peerData.get("port");
+            String peerId = (String) peerData.get("peerId");
+            
+            if (ip == null || portNum == null) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(Map.of("error", "Missing required fields: ip and port"));
+            }
+            
+            int port = portNum.intValue();
+            if (port < 1 || port > 65535) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(Map.of("error", "Invalid port number: " + port));
+            }
+            
+            trackerService.registerPeerManually(infoHash, ip, port, peerId);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("infoHash", infoHash);
+            response.put("peer", Map.of("ip", ip, "port", port, "peerId", peerId != null ? peerId : "manual-peer"));
+            response.put("message", "Peer registered in tracker successfully");
+            
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(Map.of("error", "Failed to register peer: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Get all peers for a swarm (REST API)
+     * GET /api/tracker/swarms/{infoHash}/peers
+     */
+    @GetMapping("/api/tracker/swarms/{infoHash}/peers")
+    public ResponseEntity<Map<String, Object>> getSwarmPeers(@PathVariable String infoHash) {
+        List<PeerAddress> peers = trackerService.getPeers(infoHash);
+        
+        List<Map<String, Object>> peerList = peers.stream()
+            .map(peer -> {
+                Map<String, Object> map = new HashMap<>();
+                map.put("ip", peer.ip());
+                map.put("port", peer.port());
+                map.put("peerId", peer.peerId());
+                map.put("lastSeen", peer.lastSeen());
+                return map;
+            })
+            .toList();
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("infoHash", infoHash);
+        response.put("peers", peerList);
+        response.put("count", peerList.size());
+        
+        return ResponseEntity.ok(response);
     }
 }
 

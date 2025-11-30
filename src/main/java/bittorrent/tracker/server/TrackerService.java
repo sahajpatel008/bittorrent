@@ -68,6 +68,18 @@ public class TrackerService {
         }
     }
 
+    /**
+     * Manually register a peer in the tracker (for testing/bootstrap)
+     * @param infoHashHex The info hash hex string
+     * @param ip Peer IP address
+     * @param port Peer port
+     * @param peerId Peer ID (optional, defaults to "manual-peer")
+     */
+    public void registerPeerManually(String infoHashHex, String ip, int port, String peerId) {
+        String effectivePeerId = peerId != null && !peerId.isEmpty() ? peerId : "manual-peer";
+        announce(infoHashHex, ip, port, effectivePeerId);
+    }
+
     private void cleanup(String infoHashHex) {
         Set<PeerAddress> peers = swarms.get(infoHashHex);
         if (peers == null) return;

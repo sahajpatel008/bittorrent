@@ -24,6 +24,32 @@ public class TrackerClient {
 
 	private static final long UDP_PROTOCOL_ID = 0x41727101980L;
 
+	/**
+	 * BitTorrent tracker event types
+	 */
+	public enum Event {
+		NONE(0, ""),      // Regular update (no event)
+		STARTED(1, "started"),    // Download/upload started
+		COMPLETED(2, "completed"), // Download completed (now seeding)
+		STOPPED(3, "stopped");    // Download/upload stopped
+
+		private final int udpValue;
+		private final String httpValue;
+
+		Event(int udpValue, String httpValue) {
+			this.udpValue = udpValue;
+			this.httpValue = httpValue;
+		}
+
+		public int getUdpValue() {
+			return udpValue;
+		}
+
+		public String getHttpValue() {
+			return httpValue;
+		}
+	}
+
 	private final OkHttpClient client = new OkHttpClient();
 	private final String peerId;
 	private final short listenPort;
@@ -38,12 +64,12 @@ public class TrackerClient {
 	}
 
 	public AnnounceResponse announce(Announceable announceable) throws IOException {
-		return announce(announceable, listenPort, announceable.getInfoLength());
+		return announce(announceable, listenPort, announceable.getInfoLength(), Event.NONE);
 	}
 
 	@SuppressWarnings("unchecked")
 	public AnnounceResponse announce(Announceable announceable, int port) throws IOException {
-		return announce(announceable, port, announceable.getInfoLength());
+		return announce(announceable, port, announceable.getInfoLength(), Event.NONE);
 	}
 
 	/**
@@ -52,6 +78,18 @@ public class TrackerClient {
 	 */
 	@SuppressWarnings("unchecked")
 	public AnnounceResponse announce(Announceable announceable, int port, long left) throws IOException {
+		return announce(announceable, port, left, Event.NONE);
+	}
+
+	/**
+	 * Announces with an explicit 'left' value and event type.
+	 * @param announceable The torrent to announce
+	 * @param port The port this peer is listening on
+	 * @param left Bytes remaining to download (0 means completed/seeding)
+	 * @param event The event type (STARTED, COMPLETED, STOPPED, or NONE for regular updates)
+	 */
+	@SuppressWarnings("unchecked")
+	public AnnounceResponse announce(Announceable announceable, int port, long left, Event event) throws IOException {
 		final var trackerUrl = announceable.getTrackerUrl();
 		System.out.println("Attempting to pass tracker url : " + trackerUrl);
 
@@ -59,27 +97,31 @@ public class TrackerClient {
 		final var scheme = uri.getScheme();
 
 		if ("udp".equalsIgnoreCase(scheme)) {
-			return announceUdp(announceable, uri);
+			return announceUdp(announceable, uri, event);
 		}
 
 		if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
 			throw new IllegalStateException("Unsupported tracker scheme: " + scheme);
 		}
 
+		var urlBuilder = Objects.requireNonNull(HttpUrl.parse(trackerUrl), "Invalid tracker URL")
+			.newBuilder()
+			.addEncodedQueryParameter("info_hash", DigestUtils.urlEncode(announceable.getInfoHash()))
+			.addQueryParameter("peer_id", peerId)
+			.addQueryParameter("port", String.valueOf(port))
+			.addQueryParameter("uploaded", "0")
+			.addQueryParameter("downloaded", String.valueOf(announceable.getInfoLength() - left))
+			.addQueryParameter("left", String.valueOf(left))
+			.addQueryParameter("compact", "1");
+		
+		// Add event parameter if not NONE
+		if (event != Event.NONE && !event.getHttpValue().isEmpty()) {
+			urlBuilder.addQueryParameter("event", event.getHttpValue());
+		}
+		
 		final var request = new Request.Builder()
 			.get()
-			.url(
-				Objects.requireNonNull(HttpUrl.parse(trackerUrl), "Invalid tracker URL")
-					.newBuilder()
-					.addEncodedQueryParameter("info_hash", DigestUtils.urlEncode(announceable.getInfoHash()))
-					.addQueryParameter("peer_id", peerId)
-					.addQueryParameter("port", String.valueOf(port))
-					.addQueryParameter("uploaded", "0")
-					.addQueryParameter("downloaded", String.valueOf(announceable.getInfoLength() - left))
-					.addQueryParameter("left", String.valueOf(left))
-					.addQueryParameter("compact", "1")
-					.build()
-			)
+			.url(urlBuilder.build())
 			.build();
 
 		try (
@@ -99,7 +141,7 @@ public class TrackerClient {
 		}
 	}
 
-	private AnnounceResponse announceUdp(Announceable announceable, URI uri) throws IOException {
+	private AnnounceResponse announceUdp(Announceable announceable, URI uri, Event event) throws IOException {
 		final var host = uri.getHost();
 		final var port = uri.getPort() == -1 ? 80 : uri.getPort();
 		final var address = new InetSocketAddress(host, port);
@@ -109,7 +151,7 @@ public class TrackerClient {
 			socket.setSoTimeout(5000);
 
 			final var connectionId = performUdpHandshake(socket);
-			return performUdpAnnounce(socket, connectionId, announceable);
+			return performUdpAnnounce(socket, connectionId, announceable, event);
 		}
 	}
 
@@ -137,7 +179,7 @@ public class TrackerClient {
 		return response.getLong();
 	}
 
-	private AnnounceResponse performUdpAnnounce(DatagramSocket socket, long connectionId, Announceable announceable) throws IOException {
+	private AnnounceResponse performUdpAnnounce(DatagramSocket socket, long connectionId, Announceable announceable, Event event) throws IOException {
 		final var transactionId = ThreadLocalRandom.current().nextInt();
 		final var infoHash = announceable.getInfoHash();
 		final var peerIdBytes = peerId.getBytes(StandardCharsets.US_ASCII);
@@ -151,7 +193,7 @@ public class TrackerClient {
 		announceBuffer.putLong(0); // downloaded
 		announceBuffer.putLong(announceable.getInfoLength());
 		announceBuffer.putLong(0); // uploaded
-		announceBuffer.putInt(0); // event: none
+		announceBuffer.putInt(event.getUdpValue()); // event: 0=none, 1=started, 2=completed, 3=stopped
 		announceBuffer.putInt(0); // IP address (default)
 		announceBuffer.putInt(ThreadLocalRandom.current().nextInt()); // key
 		announceBuffer.putInt(-1); // num want

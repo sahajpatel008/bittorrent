@@ -10,24 +10,29 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import bittorrent.BitTorrentApplication;
+import bittorrent.peer.storage.SwarmPersistenceService;
 
 /**
- * Simple in-memory swarm manager that tracks known and active peers per
- * torrent (info hash).
- *
- * This is intentionally lightweight and not thread-perfect; it is good
- * enough for local testing with a small number of peers.
+ * Swarm manager that tracks known and active peers per torrent (info hash).
+ * Now includes persistence to survive restarts and manual peer entry for bootstrap.
  */
 public class SwarmManager {
 
     private static final SwarmManager INSTANCE = new SwarmManager();
+    private static final long SAVE_INTERVAL_SECONDS = 60; // Save every minute
 
     public static SwarmManager getInstance() {
         return INSTANCE;
     }
+    
+    private final SwarmPersistenceService persistenceService = new SwarmPersistenceService();
+    private final ScheduledExecutorService saveScheduler = Executors.newScheduledThreadPool(1);
 
     private static class SwarmState {
         final Set<InetSocketAddress> knownPeers = ConcurrentHashMap.newKeySet();
@@ -39,9 +44,69 @@ public class SwarmManager {
 
     // Map<infoHashHex, SwarmState>
     private final Map<String, SwarmState> swarms = new ConcurrentHashMap<>();
+    
+    private SwarmManager() {
+        // Load persisted peers on startup
+        loadPersistedPeers();
+        
+        // Schedule periodic saves
+        saveScheduler.scheduleAtFixedRate(
+            this::savePersistedPeers,
+            SAVE_INTERVAL_SECONDS,
+            SAVE_INTERVAL_SECONDS,
+            TimeUnit.SECONDS
+        );
+        
+        // Save on shutdown
+        Runtime.getRuntime().addShutdownHook(new Thread(this::savePersistedPeers));
+    }
 
     private SwarmState getOrCreate(String infoHashHex) {
         return swarms.computeIfAbsent(infoHashHex, k -> new SwarmState());
+    }
+    
+    /**
+     * Load persisted peers from disk
+     */
+    private void loadPersistedPeers() {
+        Map<String, Set<InetSocketAddress>> persisted = persistenceService.load();
+        for (Map.Entry<String, Set<InetSocketAddress>> entry : persisted.entrySet()) {
+            SwarmState state = getOrCreate(entry.getKey());
+            state.knownPeers.addAll(entry.getValue());
+        }
+        if (BitTorrentApplication.DEBUG && !persisted.isEmpty()) {
+            System.out.println("SwarmManager: Loaded " + persisted.size() + " swarms from persistence");
+        }
+    }
+    
+    /**
+     * Save known peers to disk (only known peers, not active/dropped)
+     */
+    private void savePersistedPeers() {
+        Map<String, Set<InetSocketAddress>> toSave = new ConcurrentHashMap<>();
+        for (Map.Entry<String, SwarmState> entry : swarms.entrySet()) {
+            if (!entry.getValue().knownPeers.isEmpty()) {
+                toSave.put(entry.getKey(), new java.util.HashSet<>(entry.getValue().knownPeers));
+            }
+        }
+        persistenceService.save(toSave);
+    }
+    
+    /**
+     * Manually add a peer to the swarm (for bootstrap when tracker is down)
+     * @param infoHashHex The info hash hex string
+     * @param address The peer address to add
+     */
+    public void addPeerManually(String infoHashHex, InetSocketAddress address) {
+        SwarmState state = getOrCreate(infoHashHex);
+        if (state.knownPeers.add(address)) {
+            state.droppedPeers.remove(address);
+            // Trigger save
+            savePersistedPeers();
+            if (BitTorrentApplication.DEBUG) {
+                System.out.println("SwarmManager: Manually added peer " + address + " for " + infoHashHex);
+            }
+        }
     }
 
     public void registerTrackerPeers(String infoHashHex, List<InetSocketAddress> peers, int selfPort) {

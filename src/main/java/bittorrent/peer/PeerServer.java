@@ -8,16 +8,21 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import bittorrent.peer.protocol.Message;
 import bittorrent.peer.protocol.MetadataMessage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import bittorrent.BitTorrentApplication;
+import bittorrent.service.storage.TorrentPersistenceService;
 import bittorrent.Main;
 import bittorrent.config.BitTorrentConfig;
 import bittorrent.torrent.TorrentInfo;
@@ -37,6 +42,9 @@ public class PeerServer {
     
     private ServerSocket serverSocket;
     private boolean running = false;
+    
+    @Autowired(required = false)
+    private TorrentPersistenceService persistenceService;
 
     public PeerServer(BitTorrentConfig config) {
         this.config = config;
@@ -66,6 +74,85 @@ public class PeerServer {
         activeTorrents.put(infoHashHex, torrentInfo);
         torrentFiles.put(infoHashHex, file);
         System.out.println("Registered torrent for seeding: " + infoHashHex);
+        
+        // Save state
+        saveSeedingTorrents();
+    }
+    
+    /**
+     * Save seeding torrents state
+     */
+    public void saveSeedingTorrents() {
+        if (persistenceService == null) return;
+        
+        Map<String, TorrentPersistenceService.SeedingTorrentState> states = new ConcurrentHashMap<>();
+        for (Map.Entry<String, TorrentInfo> entry : activeTorrents.entrySet()) {
+            String infoHashHex = entry.getKey();
+            File dataFile = torrentFiles.get(infoHashHex);
+            if (dataFile != null) {
+                TorrentPersistenceService.SeedingTorrentState state = 
+                    new TorrentPersistenceService.SeedingTorrentState();
+                state.infoHashHex = infoHashHex;
+                state.dataFilePath = dataFile.getAbsolutePath();
+                state.fileName = dataFile.getName();
+                
+                // Get torrent file path
+                String torrentPath = persistenceService.getTorrentFilePath(infoHashHex);
+                state.torrentFilePath = torrentPath;
+                
+                states.put(infoHashHex, state);
+            }
+        }
+        
+        persistenceService.saveSeedingTorrents(states);
+    }
+    
+    /**
+     * Load persisted seeding torrents on startup
+     */
+    public void loadPersistedSeedingTorrents() {
+        if (persistenceService == null) return;
+        
+        List<TorrentPersistenceService.SeedingTorrentState> states = 
+            persistenceService.loadSeedingTorrents();
+        
+        for (var state : states) {
+            try {
+                // Check if data file still exists
+                File dataFile = new File(state.dataFilePath);
+                if (!dataFile.exists()) {
+                    System.out.println("Skipping seeding torrent " + state.infoHashHex + 
+                        ": data file not found at " + state.dataFilePath);
+                    continue;
+                }
+                
+                // Check if torrent file exists
+                String torrentPath = persistenceService.getTorrentFilePath(state.infoHashHex);
+                if (torrentPath == null) {
+                    System.out.println("Skipping seeding torrent " + state.infoHashHex + 
+                        ": torrent file not found");
+                    continue;
+                }
+                
+                // Load torrent and register
+                bittorrent.torrent.Torrent torrent = bittorrent.service.BitTorrentService.loadTorrentStatic(torrentPath);
+                TorrentInfo torrentInfo = torrent.info();
+                
+                activeTorrents.put(state.infoHashHex, torrentInfo);
+                torrentFiles.put(state.infoHashHex, dataFile);
+                
+                System.out.println("Resumed seeding torrent: " + state.infoHashHex + 
+                    " (" + state.fileName + ")");
+                
+                // Re-announce to tracker (will be handled by BitTorrentService)
+            } catch (Exception e) {
+                System.err.println("Failed to resume seeding torrent " + state.infoHashHex + 
+                    ": " + e.getMessage());
+                if (BitTorrentApplication.DEBUG) {
+                    e.printStackTrace();
+                }
+            }
+        }
     }
 
     public String getTorrentStatus(byte[] infoHash) {
@@ -77,6 +164,27 @@ public class PeerServer {
             return "Seeding: Yes | InfoHash: " + infoHashHex;
         }
         return "Seeding: No (Torrent not registered)";
+    }
+    
+    /**
+     * Check if a torrent is currently active (registered for seeding)
+     */
+    public boolean isTorrentActive(String infoHashHex) {
+        return activeTorrents.containsKey(infoHashHex);
+    }
+    
+    /**
+     * Get all active torrents (info hashes)
+     */
+    public Set<String> getActiveTorrents() {
+        return new HashSet<>(activeTorrents.keySet());
+    }
+    
+    /**
+     * Get file for a torrent
+     */
+    public File getTorrentFile(String infoHashHex) {
+        return torrentFiles.get(infoHashHex);
     }
 
     private void acceptLoop() {

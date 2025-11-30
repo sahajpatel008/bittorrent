@@ -9,15 +9,20 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
@@ -32,9 +37,12 @@ import bittorrent.peer.Peer;
 import bittorrent.peer.PeerConnectionManager;
 import bittorrent.peer.SwarmManager;
 import bittorrent.peer.PeerServer;
+import bittorrent.service.PeerStats;
+import bittorrent.bencode.BencodeDeserializer;
 import bittorrent.torrent.Torrent;
 import bittorrent.torrent.TorrentInfo;
 import bittorrent.tracker.TrackerClient;
+import bittorrent.tracker.TrackerClient.Event;
 import bittorrent.util.DigestUtils;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -48,17 +56,31 @@ public class BitTorrentService {
 	private final HexFormat hexFormat = BitTorrentApplication.HEX_FORMAT;
 	private final PeerServer peerServer;
 	private final BitTorrentConfig config;
+	private final TorrentProgressService progressService;
+	private final bittorrent.service.storage.TorrentPersistenceService persistenceService;
 	
 	// Download job tracking
 	private final Map<String, DownloadJob> downloadJobs = new ConcurrentHashMap<>();
 	private final ExecutorService downloadExecutor = Executors.newCachedThreadPool();
 	
+	// Track active torrents for periodic re-announcements
+	// Map<infoHashHex, Torrent> - tracks torrents that need periodic updates
+	private final Map<String, Torrent> activeTorrentsForAnnounce = new ConcurrentHashMap<>();
+	private final ScheduledExecutorService announceScheduler = Executors.newScheduledThreadPool(1);
+	private ScheduledFuture<?> announceTask;
+	private ScheduledFuture<?> saveTask;
+	
 	// Default download directory
 	private static final String DEFAULT_DOWNLOAD_DIR = System.getProperty("user.home") + "/bittorrent-downloads";
+	// Re-announce interval: 20 minutes (slightly less than tracker's 30-minute timeout)
+	private static final long REANNOUNCE_INTERVAL_MINUTES = 20;
 
-	public BitTorrentService(PeerServer peerServer, BitTorrentConfig config) {
+	public BitTorrentService(PeerServer peerServer, BitTorrentConfig config, TorrentProgressService progressService,
+			bittorrent.service.storage.TorrentPersistenceService persistenceService) {
 		this.peerServer = peerServer;
 		this.config = config;
+		this.progressService = progressService;
+		this.persistenceService = persistenceService;
 
 		// Create download directory if it doesn't exist
 		File downloadDir = new File(DEFAULT_DOWNLOAD_DIR);
@@ -71,11 +93,175 @@ public class BitTorrentService {
 	@PostConstruct
 	public void init() {
 		peerServer.start();
+		// Start periodic re-announcement task
+		announceTask = announceScheduler.scheduleAtFixedRate(
+			this::reannounceActiveTorrents,
+			REANNOUNCE_INTERVAL_MINUTES,
+			REANNOUNCE_INTERVAL_MINUTES,
+			TimeUnit.MINUTES
+		);
+		// Start periodic save task (every 30 seconds)
+		saveTask = announceScheduler.scheduleAtFixedRate(
+			this::saveState,
+			30,
+			30,
+			TimeUnit.SECONDS
+		);
+		// Load persisted state
+		loadPersistedState();
+	}
+	
+	/**
+	 * Load persisted download jobs and resume them
+	 */
+	private void loadPersistedState() {
+		// Load download jobs
+		List<bittorrent.service.storage.TorrentPersistenceService.DownloadJobState> jobStates = 
+			persistenceService.loadDownloadJobs();
+		
+		for (var state : jobStates) {
+			try {
+				// Check if torrent file exists
+				String torrentPath = persistenceService.getTorrentFilePath(state.infoHashHex);
+				if (torrentPath == null) {
+					System.out.println("Skipping job " + state.jobId + ": torrent file not found");
+					continue;
+				}
+				
+				// Check if download file exists
+				File downloadedFile = state.downloadedFilePath != null ? 
+					new File(state.downloadedFilePath) : null;
+				
+				if (downloadedFile != null && downloadedFile.exists()) {
+					// Resume download
+					Torrent torrent = load(torrentPath);
+					TorrentInfo torrentInfo = torrent.info();
+					
+					// Create job with persisted jobId
+					DownloadJob job = new DownloadJob(state.jobId, state.infoHashHex, state.fileName);
+					job.setTotalPieces(state.totalPieces);
+					job.setCompletedPieces(state.completedPieces);
+					job.setStatus(DownloadJob.Status.DOWNLOADING);
+					job.setDownloadedFile(downloadedFile);
+					
+					// Resume download in background
+					CompletableFuture<File> future = CompletableFuture.supplyAsync(() -> {
+						try {
+							return downloadFileInternal(torrent, torrentInfo, downloadedFile, job);
+						} catch (Exception e) {
+							job.setStatus(DownloadJob.Status.FAILED);
+							job.setErrorMessage(e.getMessage());
+							throw new RuntimeException(e);
+						}
+					}, downloadExecutor);
+					
+					job.setFuture(future);
+					future.whenComplete((file, throwable) -> {
+						if (throwable != null) {
+							job.setStatus(DownloadJob.Status.FAILED);
+							job.setErrorMessage(throwable.getMessage());
+						} else {
+							job.setStatus(DownloadJob.Status.COMPLETED);
+							job.setDownloadedFile(file);
+						}
+					});
+					
+					downloadJobs.put(job.getJobId(), job);
+					activeTorrentsForAnnounce.put(state.infoHashHex, torrent);
+					
+					System.out.println("Resumed download job: " + state.jobId + " (" + 
+						state.completedPieces + "/" + state.totalPieces + " pieces)");
+				}
+			} catch (Exception e) {
+				System.err.println("Failed to resume download job " + state.jobId + ": " + e.getMessage());
+				if (BitTorrentApplication.DEBUG) {
+					e.printStackTrace();
+				}
+			}
+		}
+		
+		// Load seeding torrents (handled by PeerServer)
+		peerServer.loadPersistedSeedingTorrents();
+		
+		// Re-announce all resumed seeding torrents
+		for (String infoHashHex : peerServer.getActiveTorrents()) {
+			try {
+				String torrentPath = persistenceService.getTorrentFilePath(infoHashHex);
+				if (torrentPath != null) {
+					Torrent torrent = load(torrentPath);
+					trackerClient.announce(torrent, config.getListenPort(), 0L, Event.STARTED);
+					activeTorrentsForAnnounce.put(infoHashHex, torrent);
+					System.out.println("Re-announced resumed seeding torrent: " + infoHashHex);
+				}
+			} catch (Exception e) {
+				System.err.println("Failed to re-announce seeding torrent " + infoHashHex + ": " + e.getMessage());
+			}
+		}
+	}
+	
+	/**
+	 * Save current state (download jobs)
+	 */
+	private void saveState() {
+		persistenceService.saveDownloadJobs(downloadJobs);
+	}
+	
+	/**
+	 * Periodically re-announce all active torrents to the tracker
+	 * to keep them from timing out (tracker removes peers after 30 minutes)
+	 */
+	private void reannounceActiveTorrents() {
+		for (Map.Entry<String, Torrent> entry : activeTorrentsForAnnounce.entrySet()) {
+			String infoHashHex = entry.getKey();
+			Torrent torrent = entry.getValue();
+			
+			// Check if torrent is still active (registered in PeerServer)
+			// If not, remove from tracking
+			if (!peerServer.isTorrentActive(infoHashHex)) {
+				activeTorrentsForAnnounce.remove(infoHashHex);
+				continue;
+			}
+			
+			try {
+				// Re-announce with left=0 (seeding) and no event (regular periodic update)
+				trackerClient.announce(torrent, config.getListenPort(), 0L, Event.NONE);
+				if (BitTorrentApplication.DEBUG) {
+					System.out.println("Re-announced torrent to tracker: " + infoHashHex);
+				}
+			} catch (IOException e) {
+				System.err.println("Failed to re-announce torrent " + infoHashHex + ": " + e.getMessage());
+			}
+		}
 	}
 
 	@PreDestroy
 	public void cleanup() {
+		// Stop periodic re-announcements
+		if (announceTask != null) {
+			announceTask.cancel(false);
+		}
+		announceScheduler.shutdown();
+		
+		// Send stopped event to tracker for all active torrents
+		for (Map.Entry<String, Torrent> entry : activeTorrentsForAnnounce.entrySet()) {
+			Torrent torrent = entry.getValue();
+			try {
+				trackerClient.announce(torrent, config.getListenPort(), 0L, Event.STOPPED);
+				if (BitTorrentApplication.DEBUG) {
+					System.out.println("Sent stopped event to tracker for: " + entry.getKey());
+				}
+			} catch (IOException e) {
+				// Ignore errors during shutdown
+				if (BitTorrentApplication.DEBUG) {
+					System.err.println("Failed to send stopped event: " + e.getMessage());
+				}
+			}
+		}
+		activeTorrentsForAnnounce.clear();
+		
+		// Stop peer server
 		peerServer.stop();
+		// Shutdown download executor
 		downloadExecutor.shutdown();
 	}
 	
@@ -149,6 +335,82 @@ public class BitTorrentService {
 	}
 	
 	/**
+	 * Get all active download jobs (for progress service)
+	 */
+	public List<DownloadJob> getAllActiveJobs() {
+		return new ArrayList<>(downloadJobs.values());
+	}
+	
+	/**
+	 * Send progress update via SSE
+	 */
+	private void sendProgressUpdate(DownloadJob job) {
+		Map<String, Object> update = buildProgressUpdate(job);
+		progressService.sendUpdate(job.getJobId(), job.getInfoHashHex(), update);
+	}
+	
+	/**
+	 * Build progress update map for SSE (public for TorrentProgressService)
+	 */
+	public Map<String, Object> buildProgressUpdate(DownloadJob job) {
+		Map<String, Object> update = new LinkedHashMap<>();
+		update.put("jobId", job.getJobId());
+		update.put("infoHash", job.getInfoHashHex());
+		update.put("fileName", job.getFileName());
+		update.put("status", job.getStatus().name());
+		update.put("totalPieces", job.getTotalPieces());
+		update.put("completedPieces", job.getCompletedPieces());
+		update.put("progress", job.getProgress());
+		update.put("overallDownloadSpeed", job.getOverallDownloadSpeed());
+		update.put("startTime", job.getStartTime());
+		update.put("lastUpdateTime", job.getLastUpdateTime());
+		
+		// Peer statistics
+		List<Map<String, Object>> peerStatsList = new ArrayList<>();
+		for (Map.Entry<String, PeerStats> entry : job.getPeerStats().entrySet()) {
+			PeerStats stats = entry.getValue();
+			Map<String, Object> peerInfo = new LinkedHashMap<>();
+			peerInfo.put("address", stats.getAddress().toString());
+			peerInfo.put("ip", stats.getAddress().getAddress().getHostAddress());
+			peerInfo.put("port", stats.getAddress().getPort());
+			peerInfo.put("bytesDownloaded", stats.getBytesDownloaded());
+			peerInfo.put("bytesUploaded", stats.getBytesUploaded());
+			peerInfo.put("piecesDownloaded", stats.getPiecesDownloaded());
+			peerInfo.put("piecesUploaded", stats.getPiecesUploaded());
+			peerInfo.put("downloadSpeed", stats.getDownloadSpeed());
+			peerInfo.put("uploadSpeed", stats.getUploadSpeed());
+			peerInfo.put("downloadedPieces", stats.getDownloadedPieces());
+			peerInfo.put("connectionDuration", stats.getConnectionDuration());
+			peerInfo.put("isChoked", stats.isChoked());
+			peerInfo.put("isInterested", stats.isInterested());
+			peerInfo.put("peerChoking", stats.isPeerChoking());
+			peerInfo.put("peerInterested", stats.isPeerInterested());
+			peerStatsList.add(peerInfo);
+		}
+		update.put("peers", peerStatsList);
+		
+		// Piece source mapping
+		Map<String, String> pieceSource = new LinkedHashMap<>();
+		for (Map.Entry<Integer, String> entry : job.getPieceSource().entrySet()) {
+			pieceSource.put(String.valueOf(entry.getKey()), entry.getValue());
+		}
+		update.put("pieceSource", pieceSource);
+		
+		return update;
+	}
+	
+	/**
+	 * Force announce to tracker for a torrent
+	 */
+	public void forceAnnounce(String infoHashHex) throws IOException {
+		Torrent torrent = activeTorrentsForAnnounce.get(infoHashHex);
+		if (torrent == null) {
+			throw new IllegalArgumentException("Torrent not found: " + infoHashHex);
+		}
+		trackerClient.announce(torrent, config.getListenPort(), 0L, Event.NONE);
+	}
+	
+	/**
 	 * Internal download method that handles the actual download process.
 	 */
 	private File downloadFileInternal(Torrent torrent, TorrentInfo torrentInfo, File outputFile, DownloadJob job) 
@@ -165,16 +427,23 @@ public class BitTorrentService {
 			swarmManager.acquirePeers(infoHashHex, MIN_KNOWN_PEERS);
 
 		if (candidatePeers.size() < MIN_KNOWN_PEERS) {
-			final var response = trackerClient.announce(torrent);
-			final var trackerPeers = response.peers().stream()
-				.filter(p -> p.getPort() != config.getListenPort())
-				.toList();
-
-			if (trackerPeers.isEmpty() && candidatePeers.isEmpty()) {
-				throw new IOException("No other peers returned by tracker or PEX.");
+			// Try to get peers from tracker (initial announcement when download starts)
+			java.util.List<java.net.InetSocketAddress> trackerPeers = java.util.List.of();
+			try {
+				final var response = trackerClient.announce(torrent, config.getListenPort(), torrentInfo.length(), Event.STARTED);
+				trackerPeers = response.peers().stream()
+					.filter(p -> p.getPort() != config.getListenPort())
+					.toList();
+				swarmManager.registerTrackerPeers(infoHashHex, trackerPeers, config.getListenPort());
+			} catch (IOException e) {
+				// Tracker unavailable - log but continue if we have PEX peers
+				System.err.println("Tracker unavailable: " + e.getMessage() + ". Relying on PEX peers.");
 			}
 
-			swarmManager.registerTrackerPeers(infoHashHex, trackerPeers, config.getListenPort());
+			if (trackerPeers.isEmpty() && candidatePeers.isEmpty()) {
+				throw new IOException("No peers available: tracker returned no peers and no PEX peers known. " +
+					"Cannot bootstrap without at least one peer.");
+			}
 			candidatePeers = swarmManager.acquirePeers(
 				infoHashHex,
 				Math.min(5, Math.max(MIN_KNOWN_PEERS, trackerPeers.size()))
@@ -219,9 +488,28 @@ public class BitTorrentService {
 			for (int pieceIndex = 0; pieceIndex < pieceCount; pieceIndex++) {
 				// Pick a peer in round-robin fashion
 				Peer peer = peers.get(pieceIndex % peers.size());
+				java.net.InetSocketAddress peerAddress = peer.getRemoteAddress();
+				long pieceSize = (pieceIndex == pieceCount - 1) 
+					? (torrentInfo.length() % torrentInfo.pieceLength())
+					: torrentInfo.pieceLength();
+				
+				long startTime = System.currentTimeMillis();
 				byte[] data = peer.downloadPiece(torrentInfo, pieceIndex);
+				long downloadTime = System.currentTimeMillis() - startTime;
+				
 				pieceData[pieceIndex] = data;
 				job.setCompletedPieces(pieceIndex + 1);
+				
+				// Track peer statistics
+				job.recordPieceDownloaded(pieceIndex, peerAddress, pieceSize);
+				
+				// Update peer stats with connection state
+				PeerStats stats = job.getOrCreatePeerStats(peerAddress);
+				// Note: Peer connection state would need to be exposed from Peer class
+				// For now, we track download stats
+				
+				// Send progress update after each piece
+				sendProgressUpdate(job);
 			}
 
 			// 4) Write all pieces to file
@@ -231,8 +519,14 @@ public class BitTorrentService {
 				}
 			}
 
-			// Inform tracker that we now have the full file
-			trackerClient.announce(torrent, config.getListenPort(), 0L);
+			// Inform tracker that we now have the full file (completed download, now seeding)
+			trackerClient.announce(torrent, config.getListenPort(), 0L, Event.COMPLETED);
+			
+			// Register for periodic re-announcements (now that we're seeding)
+			activeTorrentsForAnnounce.put(infoHashHex, torrent);
+			
+			// Send final progress update
+			sendProgressUpdate(job);
 			
 			System.out.println("Download complete: " + outputFile.getAbsolutePath());
 			
@@ -275,6 +569,24 @@ public class BitTorrentService {
 	 */
 	public Torrent loadTorrent(String path) throws IOException {
 		return load(path);
+	}
+	
+	/**
+	 * Static method to load torrent (for use by PeerServer)
+	 */
+	public static Torrent loadTorrentStatic(String path) throws IOException {
+		final var content = Files.readAllBytes(Paths.get(path));
+		final var decoded = new BencodeDeserializer(content).parse();
+		@SuppressWarnings("unchecked")
+		Map<String, Object> decodedMap = (Map<String, Object>) decoded;
+		return Torrent.of(decodedMap);
+	}
+	
+	/**
+	 * Save torrent file permanently
+	 */
+	public void saveTorrentFile(String infoHashHex, File torrentFile) throws IOException {
+		persistenceService.saveTorrentFile(infoHashHex, torrentFile);
 	}
 
 	private String infoToString(String trackerUrl, TorrentInfo info) {
@@ -354,6 +666,7 @@ public class BitTorrentService {
 	public void seed(String torrentPath, String filePath) throws IOException, InterruptedException {
 		final var torrent = load(torrentPath);
 		final var torrentInfo = torrent.info();
+		final String infoHashHex = hexFormat.formatHex(torrentInfo.hash());
 		final var file = new File(filePath);
 
 		if (!file.exists()) {
@@ -361,13 +674,25 @@ public class BitTorrentService {
 			return;
 		}
 
+		// Save torrent file if not already saved
+		if (!persistenceService.hasTorrentFile(infoHashHex)) {
+			File torrentFile = new File(torrentPath);
+			persistenceService.saveTorrentFile(infoHashHex, torrentFile);
+		}
+
 		// Register file with PeerServer so we can serve pieces
 		peerServer.registerTorrent(torrentInfo, file);
 		System.out.println("Registered " + filePath + " for seeding.");
 
-		// Announce to tracker with our listen port
-		trackerClient.announce(torrent, config.getListenPort());
+		// Announce to tracker with left=0 and started event (starting to seed existing file)
+		trackerClient.announce(torrent, config.getListenPort(), 0L, Event.STARTED);
 		System.out.println("Announced to tracker on port " + config.getListenPort() + ". Seeding...");
+		
+		// Register for periodic re-announcements
+		activeTorrentsForAnnounce.put(infoHashHex, torrent);
+		
+		// Save seeding state
+		peerServer.saveSeedingTorrents();
 
 		// Note: Seeding continues in background via PeerServer
 		// No need to block - the application stays running and PeerServer handles connections
@@ -436,7 +761,8 @@ public class BitTorrentService {
 
 	public String getPeers(String path) throws IOException {
 		final var torrent = load(path);
-		final var response = trackerClient.announce(torrent);
+		// Query peers without event (just getting peer list)
+		final var response = trackerClient.announce(torrent, config.getListenPort(), torrent.info().length(), Event.NONE);
 
 		return response.peers().stream()
 			.map(peer -> "%s:%d".formatted(peer.getAddress().getHostAddress(), peer.getPort()))
@@ -465,7 +791,8 @@ public class BitTorrentService {
 		final var fullFile = new File(torrentInfo.name());
 		peerServer.registerTorrent(torrentInfo, fullFile);
 
-		final var response = trackerClient.announce(torrent);
+		// Query peers without event (just getting peer list for status)
+		final var response = trackerClient.announce(torrent, config.getListenPort(), 0L, Event.NONE);
 		final var peers = response.peers().stream()
 			.filter(p -> p.getPort() != config.getListenPort()) // avoid connecting to ourselves
 			.toList();
@@ -511,17 +838,26 @@ public class BitTorrentService {
 			swarmManager.acquirePeers(infoHashHex, MIN_KNOWN_PEERS);
 
 		if (candidatePeers.size() < MIN_KNOWN_PEERS) {
-			final var response = trackerClient.announce(torrent);
-			final var trackerPeers = response.peers().stream()
-				.filter(p -> p.getPort() != config.getListenPort()) // avoid connecting to ourselves
-				.toList();
-
-			if (trackerPeers.isEmpty() && candidatePeers.isEmpty()) {
-				System.out.println("No other peers returned by tracker or PEX.");
-				return;
+			// Try to get peers from tracker (initial announcement when download starts)
+			java.util.List<java.net.InetSocketAddress> trackerPeers = java.util.List.of();
+			try {
+				final var response = trackerClient.announce(torrent, config.getListenPort(), torrentInfo.length(), Event.STARTED);
+				trackerPeers = response.peers().stream()
+					.filter(p -> p.getPort() != config.getListenPort()) // avoid connecting to ourselves
+					.toList();
+				swarmManager.registerTrackerPeers(infoHashHex, trackerPeers, config.getListenPort());
+			} catch (IOException e) {
+				// Tracker unavailable - log but continue if we have PEX peers
+				System.err.println("Tracker unavailable: " + e.getMessage() + ". Relying on PEX peers.");
 			}
 
-			swarmManager.registerTrackerPeers(infoHashHex, trackerPeers, config.getListenPort());
+			if (trackerPeers.isEmpty() && candidatePeers.isEmpty()) {
+				System.out.println("No peers available: tracker returned no peers and no PEX peers known. " +
+					"Cannot bootstrap without at least one peer. " +
+					"Solution: Use POST /api/torrents/{infoHash}/peers to manually add a peer address, " +
+					"or ensure tracker is running and has peers for this torrent.");
+				return;
+			}
 			candidatePeers = swarmManager.acquirePeers(
 				infoHashHex,
 				Math.min(5, Math.max(MIN_KNOWN_PEERS, trackerPeers.size()))
@@ -579,8 +915,8 @@ public class BitTorrentService {
 				}
 			}
 
-			// Inform tracker that we now have the full file (left=0)
-			trackerClient.announce(torrent, config.getListenPort(), 0L);
+			// Inform tracker that we now have the full file (completed download, now seeding)
+			trackerClient.announce(torrent, config.getListenPort(), 0L, Event.COMPLETED);
 			
 			System.out.println("Downloaded to: " + outputPath);
 			System.out.println("Download complete. Now seeding... (press Ctrl+C to stop)");

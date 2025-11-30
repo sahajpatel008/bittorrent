@@ -3,9 +3,11 @@ package bittorrent.controller;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,14 +22,17 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import bittorrent.Main;
 import bittorrent.peer.PeerServer;
 import bittorrent.peer.SwarmManager;
+import bittorrent.service.TorrentProgressService;
 import bittorrent.service.BitTorrentService;
 import bittorrent.service.DownloadJob;
 import bittorrent.torrent.Torrent;
@@ -39,11 +44,13 @@ public class BitTorrentController {
 
 	private final BitTorrentService bitTorrentService;
 	private final PeerServer peerServer;
+	private final TorrentProgressService progressService;
 
 	@Autowired
-	public BitTorrentController(BitTorrentService bitTorrentService, PeerServer peerServer) {
+	public BitTorrentController(BitTorrentService bitTorrentService, PeerServer peerServer, TorrentProgressService progressService) {
 		this.bitTorrentService = bitTorrentService;
 		this.peerServer = peerServer;
+		this.progressService = progressService;
 	}
 
 	@GetMapping("/")
@@ -66,6 +73,10 @@ public class BitTorrentController {
 			
 			final var torrent = bitTorrentService.loadTorrent(tempFile.getAbsolutePath());
 			final var info = torrent.info();
+			final String infoHashHex = Main.HEX_FORMAT.formatHex(info.hash());
+			
+			// Save torrent file permanently
+			bitTorrentService.saveTorrentFile(infoHashHex, tempFile);
 			
 			Map<String, Object> response = new HashMap<>();
 			response.put("trackerUrl", torrent.announce());
@@ -73,7 +84,7 @@ public class BitTorrentController {
 			response.put("length", info.length());
 			response.put("pieceLength", info.pieceLength());
 			response.put("pieceCount", info.pieces().size());
-			response.put("infoHash", Main.HEX_FORMAT.formatHex(info.hash()));
+			response.put("infoHash", infoHashHex);
 			
 			tempFile.delete();
 			
@@ -261,14 +272,48 @@ public class BitTorrentController {
 	}
 
 	/**
-	 * Get list of active torrents (currently seeding)
+	 * Get list of active torrents (currently seeding/downloading)
 	 * GET /api/torrents
 	 */
 	@GetMapping("/torrents")
 	public ResponseEntity<List<Map<String, Object>>> getActiveTorrents() {
-		// This would require tracking active torrents in PeerServer
-		// For now, return empty list or implement tracking
-		return ResponseEntity.ok(List.of());
+		List<Map<String, Object>> torrents = new ArrayList<>();
+		
+		// Get all active download jobs
+		for (DownloadJob job : bitTorrentService.getAllActiveJobs()) {
+			Map<String, Object> torrentInfo = new HashMap<>();
+			torrentInfo.put("infoHash", job.getInfoHashHex());
+			torrentInfo.put("fileName", job.getFileName());
+			torrentInfo.put("status", job.getStatus().name());
+			torrentInfo.put("progress", job.getProgress());
+			torrentInfo.put("completedPieces", job.getCompletedPieces());
+			torrentInfo.put("totalPieces", job.getTotalPieces());
+			torrentInfo.put("jobId", job.getJobId());
+			torrentInfo.put("downloadSpeed", job.getOverallDownloadSpeed());
+			torrentInfo.put("type", "downloading");
+			torrents.add(torrentInfo);
+		}
+		
+		// Also include seeding torrents from PeerServer
+		Set<String> seedingTorrents = peerServer.getActiveTorrents();
+		for (String infoHash : seedingTorrents) {
+			// Check if already in list (might be both downloading and seeding)
+			boolean alreadyExists = torrents.stream()
+				.anyMatch(t -> infoHash.equals(t.get("infoHash")));
+			
+			if (!alreadyExists) {
+				Map<String, Object> torrentInfo = new HashMap<>();
+				torrentInfo.put("infoHash", infoHash);
+				File file = peerServer.getTorrentFile(infoHash);
+				torrentInfo.put("fileName", file != null ? file.getName() : "unknown");
+				torrentInfo.put("status", "SEEDING");
+				torrentInfo.put("progress", 100.0);
+				torrentInfo.put("type", "seeding");
+				torrents.add(torrentInfo);
+			}
+		}
+		
+		return ResponseEntity.ok(torrents);
 	}
 
 	/**
@@ -337,6 +382,153 @@ public class BitTorrentController {
 		Map<String, Object> response = new HashMap<>();
 		response.put("infoHash", infoHash);
 		response.put("message", "Stop seeding not yet implemented");
+		return ResponseEntity.ok(response);
+	}
+
+	/**
+	 * Manually add a peer to the swarm (for bootstrap when tracker is down)
+	 * POST /api/torrents/{infoHash}/peers
+	 * Body: { "ip": "192.168.1.1", "port": 6881 }
+	 */
+	@PostMapping("/torrents/{infoHash}/peers")
+	public ResponseEntity<Map<String, Object>> addPeer(
+			@PathVariable String infoHash,
+			@RequestBody Map<String, Object> peerData) {
+		try {
+			String ip = (String) peerData.get("ip");
+			Number portNum = (Number) peerData.get("port");
+			
+			if (ip == null || portNum == null) {
+				return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+					.body(Map.of("error", "Missing required fields: ip and port"));
+			}
+			
+			int port = portNum.intValue();
+			if (port < 1 || port > 65535) {
+				return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+					.body(Map.of("error", "Invalid port number: " + port));
+			}
+			
+			java.net.InetSocketAddress address = new java.net.InetSocketAddress(ip, port);
+			var swarmManager = SwarmManager.getInstance();
+			swarmManager.addPeerManually(infoHash, address);
+			
+			Map<String, Object> response = new HashMap<>();
+			response.put("infoHash", infoHash);
+			response.put("peer", Map.of("ip", ip, "port", port));
+			response.put("message", "Peer added successfully. Use this when tracker is unavailable to bootstrap.");
+			
+			return ResponseEntity.ok(response);
+		} catch (Exception e) {
+			return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+				.body(Map.of("error", "Failed to add peer: " + e.getMessage()));
+		}
+	}
+
+	/**
+	 * Real-time progress updates via Server-Sent Events (SSE)
+	 * GET /api/torrents/download/{jobId}/progress
+	 */
+	@GetMapping(value = "/torrents/download/{jobId}/progress", produces = "text/event-stream")
+	public SseEmitter getProgressStream(@PathVariable String jobId) {
+		return progressService.subscribeToJob(jobId);
+	}
+
+	/**
+	 * Real-time updates for a torrent (all jobs)
+	 * GET /api/torrents/{infoHash}/progress
+	 */
+	@GetMapping(value = "/torrents/{infoHash}/progress", produces = "text/event-stream")
+	public SseEmitter getTorrentProgressStream(@PathVariable String infoHash) {
+		return progressService.subscribeToTorrent(infoHash);
+	}
+
+	/**
+	 * Force announce to tracker
+	 * POST /api/torrents/{infoHash}/announce
+	 */
+	@PostMapping("/torrents/{infoHash}/announce")
+	public ResponseEntity<Map<String, Object>> forceAnnounce(@PathVariable String infoHash) {
+		try {
+			bitTorrentService.forceAnnounce(infoHash);
+			Map<String, Object> response = new HashMap<>();
+			response.put("infoHash", infoHash);
+			response.put("message", "Successfully announced to tracker");
+			return ResponseEntity.ok(response);
+		} catch (Exception e) {
+			return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+				.body(Map.of("error", "Failed to announce: " + e.getMessage()));
+		}
+	}
+
+	/**
+	 * Get detailed peer statistics for a download job
+	 * GET /api/torrents/download/{jobId}/peers
+	 */
+	@GetMapping("/torrents/download/{jobId}/peers")
+	public ResponseEntity<Map<String, Object>> getJobPeers(@PathVariable String jobId) {
+		var job = bitTorrentService.getDownloadJob(jobId);
+		if (job == null) {
+			return ResponseEntity.status(HttpStatus.NOT_FOUND)
+				.body(Map.of("error", "Job not found: " + jobId));
+		}
+		
+		Map<String, Object> response = new HashMap<>();
+		response.put("jobId", jobId);
+		response.put("infoHash", job.getInfoHashHex());
+		
+		List<Map<String, Object>> peerList = new ArrayList<>();
+		for (Map.Entry<String, bittorrent.service.PeerStats> entry : job.getPeerStats().entrySet()) {
+			bittorrent.service.PeerStats stats = entry.getValue();
+			Map<String, Object> peerInfo = new HashMap<>();
+			peerInfo.put("address", stats.getAddress().toString());
+			peerInfo.put("ip", stats.getAddress().getAddress().getHostAddress());
+			peerInfo.put("port", stats.getAddress().getPort());
+			peerInfo.put("bytesDownloaded", stats.getBytesDownloaded());
+			peerInfo.put("bytesUploaded", stats.getBytesUploaded());
+			peerInfo.put("piecesDownloaded", stats.getPiecesDownloaded());
+			peerInfo.put("piecesUploaded", stats.getPiecesUploaded());
+			peerInfo.put("downloadSpeed", stats.getDownloadSpeed());
+			peerInfo.put("uploadSpeed", stats.getUploadSpeed());
+			peerInfo.put("downloadedPieces", stats.getDownloadedPieces());
+			peerInfo.put("connectionDuration", stats.getConnectionDuration());
+			peerInfo.put("isChoked", stats.isChoked());
+			peerInfo.put("isInterested", stats.isInterested());
+			peerInfo.put("peerChoking", stats.isPeerChoking());
+			peerInfo.put("peerInterested", stats.isPeerInterested());
+			peerList.add(peerInfo);
+		}
+		response.put("peers", peerList);
+		response.put("count", peerList.size());
+		
+		return ResponseEntity.ok(response);
+	}
+
+	/**
+	 * Get piece source mapping (which peer downloaded which piece)
+	 * GET /api/torrents/download/{jobId}/pieces
+	 */
+	@GetMapping("/torrents/download/{jobId}/pieces")
+	public ResponseEntity<Map<String, Object>> getPieceSource(@PathVariable String jobId) {
+		var job = bitTorrentService.getDownloadJob(jobId);
+		if (job == null) {
+			return ResponseEntity.status(HttpStatus.NOT_FOUND)
+				.body(Map.of("error", "Job not found: " + jobId));
+		}
+		
+		Map<String, Object> response = new HashMap<>();
+		response.put("jobId", jobId);
+		response.put("infoHash", job.getInfoHashHex());
+		response.put("totalPieces", job.getTotalPieces());
+		response.put("completedPieces", job.getCompletedPieces());
+		
+		// Convert piece source map to string keys for JSON
+		Map<String, String> pieceSource = new HashMap<>();
+		for (Map.Entry<Integer, String> entry : job.getPieceSource().entrySet()) {
+			pieceSource.put(String.valueOf(entry.getKey()), entry.getValue());
+		}
+		response.put("pieceSource", pieceSource);
+		
 		return ResponseEntity.ok(response);
 	}
 }
