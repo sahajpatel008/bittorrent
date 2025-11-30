@@ -29,6 +29,7 @@ import bittorrent.Main;
 import bittorrent.peer.PeerServer;
 import bittorrent.peer.SwarmManager;
 import bittorrent.service.BitTorrentService;
+import bittorrent.service.DownloadJob;
 import bittorrent.torrent.Torrent;
 import bittorrent.torrent.TorrentInfo;
 
@@ -112,36 +113,105 @@ public class BitTorrentController {
 	}
 
 	/**
-	 * Download complete file from a torrent
+	 * Start an asynchronous download job
 	 * POST /api/torrents/download
 	 */
 	@PostMapping("/torrents/download")
-	public ResponseEntity<Resource> downloadFile(@RequestParam("file") MultipartFile file) {
+	public ResponseEntity<Map<String, Object>> startDownload(
+			@RequestParam("file") MultipartFile file,
+			@RequestParam(value = "outputFileName", required = false) String outputFileName) {
 		try {
 			final var tempTorrentFile = java.io.File.createTempFile("torrent-", ".torrent");
 			file.transferTo(tempTorrentFile);
-
-			// Note: This will download and continue seeding
-			// For async downloads, consider returning a job ID instead
-			final var downloadedFile = bitTorrentService.downloadFile(tempTorrentFile.getAbsolutePath());
-
+			
+			// Get torrent info to determine default filename
+			final var torrent = bitTorrentService.loadTorrent(tempTorrentFile.getAbsolutePath());
+			final var torrentInfo = torrent.info();
+			
+			// Use provided filename or derive from torrent
+			String fileName = outputFileName != null ? outputFileName : 
+				(torrentInfo.name() != null ? torrentInfo.name() : "download");
+			
+			// Start async download
+			final String jobId = bitTorrentService.startDownload(tempTorrentFile.getAbsolutePath(), fileName);
+			
 			tempTorrentFile.delete();
-
-			if (downloadedFile == null) {
-				return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-					.body(new ByteArrayResource("Download failed".getBytes()));
-			}
-
-			final var resource = new FileSystemResource(downloadedFile);
-
-			return ResponseEntity.ok()
-					.header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + downloadedFile.getName() + "\"")
-					.contentType(MediaType.APPLICATION_OCTET_STREAM)
-					.body(resource);
+			
+			Map<String, Object> response = new HashMap<>();
+			response.put("jobId", jobId);
+			response.put("status", "started");
+			response.put("message", "Download started. Use /api/torrents/download/" + jobId + "/status to check progress.");
+			
+			return ResponseEntity.accepted().body(response);
 		} catch (Exception e) {
 			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-				.body(new ByteArrayResource(("Error: " + e.getMessage()).getBytes()));
+				.body(Map.of("error", "Failed to start download: " + e.getMessage()));
 		}
+	}
+	
+	/**
+	 * Get download job status
+	 * GET /api/torrents/download/{jobId}/status
+	 */
+	@GetMapping("/torrents/download/{jobId}/status")
+	public ResponseEntity<Map<String, Object>> getDownloadStatus(@PathVariable String jobId) {
+		final DownloadJob job = bitTorrentService.getDownloadJob(jobId);
+		
+		if (job == null) {
+			return ResponseEntity.status(HttpStatus.NOT_FOUND)
+				.body(Map.of("error", "Download job not found"));
+		}
+		
+		Map<String, Object> response = new HashMap<>();
+		response.put("jobId", job.getJobId());
+		response.put("status", job.getStatus().name().toLowerCase());
+		response.put("fileName", job.getFileName());
+		response.put("infoHash", job.getInfoHashHex());
+		response.put("totalPieces", job.getTotalPieces());
+		response.put("completedPieces", job.getCompletedPieces());
+		response.put("progress", job.getProgress());
+		
+		if (job.getErrorMessage() != null) {
+			response.put("error", job.getErrorMessage());
+		}
+		
+		if (job.getStatus() == DownloadJob.Status.COMPLETED && job.getDownloadedFile() != null) {
+			response.put("filePath", job.getDownloadedFile().getAbsolutePath());
+			response.put("fileSize", job.getDownloadedFile().length());
+		}
+		
+		return ResponseEntity.ok(response);
+	}
+	
+	/**
+	 * Download the completed file
+	 * GET /api/torrents/download/{jobId}/file
+	 */
+	@GetMapping("/torrents/download/{jobId}/file")
+	public ResponseEntity<Resource> getDownloadedFile(@PathVariable String jobId) {
+		final DownloadJob job = bitTorrentService.getDownloadJob(jobId);
+		
+		if (job == null) {
+			return ResponseEntity.status(HttpStatus.NOT_FOUND)
+				.body(new ByteArrayResource("Download job not found".getBytes()));
+		}
+		
+		if (job.getStatus() != DownloadJob.Status.COMPLETED) {
+			return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+				.body(new ByteArrayResource(("Download not completed. Status: " + job.getStatus()).getBytes()));
+		}
+		
+		if (job.getDownloadedFile() == null || !job.getDownloadedFile().exists()) {
+			return ResponseEntity.status(HttpStatus.NOT_FOUND)
+				.body(new ByteArrayResource("Downloaded file not found".getBytes()));
+		}
+		
+		final var resource = new FileSystemResource(job.getDownloadedFile());
+		
+		return ResponseEntity.ok()
+			.header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + job.getFileName() + "\"")
+			.contentType(MediaType.APPLICATION_OCTET_STREAM)
+			.body(resource);
 	}
 
 	/**
@@ -159,16 +229,28 @@ public class BitTorrentController {
 			torrentFile.transferTo(tempTorrentFile);
 			dataFile.transferTo(tempDataFile);
 			
-			bitTorrentService.seed(tempTorrentFile.getAbsolutePath(), tempDataFile.getAbsolutePath());
-			
+			// Move data file to permanent location
 			final var torrent = bitTorrentService.loadTorrent(tempTorrentFile.getAbsolutePath());
+			final var torrentInfo = torrent.info();
+			final String fileName = torrentInfo.name() != null ? torrentInfo.name() : "seed-" + System.currentTimeMillis();
+			final var permanentDataFile = new java.io.File(System.getProperty("user.home") + "/bittorrent-downloads", fileName);
+			permanentDataFile.getParentFile().mkdirs();
+			
+			// Copy temp file to permanent location
+			java.nio.file.Files.copy(tempDataFile.toPath(), permanentDataFile.toPath(), 
+				java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+			
+			bitTorrentService.seed(tempTorrentFile.getAbsolutePath(), permanentDataFile.getAbsolutePath());
+			
 			final var infoHash = Main.HEX_FORMAT.formatHex(torrent.info().hash());
 			
 			tempTorrentFile.delete();
+			tempDataFile.delete();
 			
 			Map<String, Object> response = new HashMap<>();
 			response.put("status", "seeding");
 			response.put("infoHash", infoHash);
+			response.put("filePath", permanentDataFile.getAbsolutePath());
 			response.put("message", "Torrent is now being seeded");
 			
 			return ResponseEntity.ok(response);

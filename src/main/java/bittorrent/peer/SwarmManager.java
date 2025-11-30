@@ -3,12 +3,13 @@ package bittorrent.peer;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import bittorrent.BitTorrentApplication;
@@ -29,15 +30,15 @@ public class SwarmManager {
     }
 
     private static class SwarmState {
-        final Set<InetSocketAddress> knownPeers = new HashSet<>();
-        final Set<InetSocketAddress> activePeers = new HashSet<>();
-        final Set<InetSocketAddress> droppedPeers = new HashSet<>();
+        final Set<InetSocketAddress> knownPeers = ConcurrentHashMap.newKeySet();
+        final Set<InetSocketAddress> activePeers = ConcurrentHashMap.newKeySet();
+        final Set<InetSocketAddress> droppedPeers = ConcurrentHashMap.newKeySet();
         // Track recently sent peers to avoid sending duplicates too quickly
-        final Map<InetSocketAddress, Long> lastSentTime = new HashMap<>();
+        final Map<InetSocketAddress, Long> lastSentTime = new ConcurrentHashMap<>();
     }
 
     // Map<infoHashHex, SwarmState>
-    private final Map<String, SwarmState> swarms = new HashMap<>();
+    private final Map<String, SwarmState> swarms = new ConcurrentHashMap<>();
 
     private SwarmState getOrCreate(String infoHashHex) {
         return swarms.computeIfAbsent(infoHashHex, k -> new SwarmState());

@@ -2,7 +2,7 @@
 
 This project is a BitTorrent client implemented in Java. It was originally a command-line tool that has been refactored into a Spring Boot web application, exposing its core functionality as a REST API.
 
-The client can parse `.torrent` files and magnet links, communicate with trackers to find peers, and download complete files from those peers.
+The client can parse `.torrent` files and magnet links, communicate with trackers to find peers, download complete files from those peers, and seed files to other peers. It also supports **Peer Exchange (PEX)** for decentralized peer discovery.
 
 ## 🛠️ Tech Stack
 
@@ -24,17 +24,23 @@ BITTORRENT-JAVA/
 ├── src/main/java/
 │   └── bittorrent/
 │       ├── BitTorrentApplication.java  # Spring Boot entry point
-│       ├── Main.java                 # Deprecated CLI entry point
+│       ├── Main.java                 # CLI entry point (for testing)
 │       │
 │       ├── controller/             # REST API definitions
 │       │   └── BitTorrentController.java
 │       │
 │       ├── service/                # Core business logic
-│       │   └── BitTorrentService.java
+│       │   ├── BitTorrentService.java
+│       │   └── DownloadJob.java    # Download job tracking
 │       │
 │       ├── bencode/                # Bencode (de)serializer classes
 │       ├── magnet/                 # Magnet link parser
 │       ├── peer/                   # Peer connection & wire protocol logic
+│       │   ├── Peer.java           # Peer connection handler
+│       │   ├── PeerServer.java     # Incoming peer connection server
+│       │   ├── SwarmManager.java   # Peer swarm management
+│       │   ├── PeerConnectionManager.java  # Active connection management
+│       │   └── protocol/           # BitTorrent protocol messages
 │       ├── torrent/                # Data models for .torrent files
 │       ├── tracker/                # Tracker HTTP client logic
 │       └── util/                   # SHA-1 and Network utilities
@@ -47,14 +53,18 @@ BITTORRENT-JAVA/
 ## ⚠️ Current Limitations
 
 *   **Single File Mode Only**: This client currently supports only single-file torrents. It assumes the `.torrent` metadata describes a single file structure. Multi-file torrents (containing a `files` list in the info dictionary) are not yet supported and may cause the download to fail or behave unexpectedly.
-*   **Single Peer Download**: Downloads are performed sequentially from a single peer rather than in parallel from the swarm.
-*   **Seeding Lifetime**: The client will seed downloaded files only while the Spring Boot application is running. There is no persistent state management across restarts.
+*   **Seeding Lifetime**: The client will seed downloaded files only while the Spring Boot application is running. There is no persistent state management across restarts (though files are saved to permanent storage).
 
-## ✅ New Features
+## ✅ Features
 
-*   **Inbound Peer Connections**: The client now runs a `PeerServer` that listens on port `6881` for incoming connections from other peers, enabling true seeding after downloads complete.
+*   **REST API**: Full REST API for frontend integration
+*   **Asynchronous Downloads**: Downloads are processed asynchronously with job tracking
+*   **Inbound Peer Connections**: The client runs a `PeerServer` that listens on port `6881` for incoming connections from other peers, enabling true seeding after downloads complete.
 *   **Client Bitfield Tracking**: The client maintains a `BitSet` to track which pieces have been successfully downloaded and verified, preventing upload of invalid data.
-*   **Debug Status Endpoint**: A new REST endpoint (`GET /api/debug/status`) allows you to check if the client is seeding a particular torrent.
+*   **Peer Exchange (PEX)**: Supports PEX protocol for decentralized peer discovery, reducing dependency on trackers.
+*   **Multi-Peer Downloads**: Downloads pieces from multiple peers in parallel using round-robin scheduling.
+*   **Permanent File Storage**: All downloaded files are saved to `~/bittorrent-downloads/` and persist across server restarts.
+*   **Thread-Safe Operations**: All shared data structures use thread-safe collections for concurrent access.
 
 ## ⚙️ Configuration
 
@@ -64,19 +74,17 @@ The client can be configured via `src/main/resources/application.properties`. Ke
 |----------|---------|-------------|
 | `bittorrent.peer-id` | `42112233445566778899` | Your client's 20-character peer ID |
 | `bittorrent.listen-port` | `6881` | Port for incoming peer connections |
-| `bittorrent.download-dir` | `./downloads` | Directory for downloaded files |
-| `bittorrent.max-connections` | `50` | Maximum simultaneous peer connections |
-| `bittorrent.max-upload-rate` | `-1` | Upload rate limit in bytes/sec (-1 = unlimited) |
-| `bittorrent.max-download-rate` | `-1` | Download rate limit in bytes/sec (-1 = unlimited) |
 | `server.port` | `8080` | HTTP API server port |
 
-See `.env.example` for a complete list of configuration options.
+**Note**: Downloaded files are automatically saved to `~/bittorrent-downloads/` directory.
 
 ## ⚙️ How to Run (Development)
 
 You must have Java (JDK 21+) and Maven installed.
 
 All commands should be run from the project's root directory (where `pom.xml` is located).
+
+### Run as Spring Boot Application (Recommended)
 
 This method uses the Spring Boot plugin to compile and run the application in one step. It's the fastest way to get the server running.
 
@@ -86,119 +94,100 @@ mvn spring-boot:run
 
 Once running, the server will be available at `http://localhost:8080`.
 
+### Build JAR and Run
+
+```bash
+mvn clean package
+java -jar target/java_bittorrent.jar
+```
+
+### Run as CLI (Testing)
+
+For testing purposes, you can still run the CLI:
+
+```bash
+mvn clean package
+java -jar target/java_bittorrent.jar <command> <args>
+```
+
 ## 📖 API Endpoints
 
-You can interact with the running application using these endpoints [cite: `BitTorrentController.java`](src/main/java/bittorrent/controller/BitTorrentController.java).
+For complete API documentation, see [API_ENDPOINTS.md](API_ENDPOINTS.md).
 
-### GET /api/decode
+### Quick Reference
 
-Decodes a Bencoded string and returns it as JSON.
+**Core Endpoints:**
+- `GET /api/` - Health check
+- `POST /api/torrents/info` - Get torrent metadata
+- `POST /api/torrents/download` - Start async download (returns job ID)
+- `GET /api/torrents/download/{jobId}/status` - Check download progress
+- `GET /api/torrents/download/{jobId}/file` - Download completed file
+- `POST /api/torrents/download/piece/{pieceIndex}` - Download specific piece
+- `POST /api/torrents/seed` - Start seeding a file
+- `GET /api/torrents/{infoHash}/status` - Get torrent status
+- `GET /api/torrents/{infoHash}/peers` - Get known peers
 
-**Query Parameter**: `encoded` (string)
+### Example: Complete Download Flow
 
-**Example**:
-
+1. **Start Download:**
 ```bash
-curl "http://localhost:8080/api/decode?encoded=d3:bar4:spam3:fooi42ee"
+curl -X POST -F "file=@example.torrent" \
+     http://localhost:8080/api/torrents/download
 ```
 
-**Response**:
-
+Response:
 ```json
-{"bar":"spam","foo":42}
+{
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "started",
+  "message": "Download started. Use /api/torrents/download/550e8400-e29b-41d4-a716-446655440000/status to check progress."
+}
 ```
 
-### POST /api/info
-
-Parses a `.torrent` file and returns its metadata as a formatted string.
-
-**Body**: `multipart/form-data`
-
-**Form Key**: `file` (file)
-
-**Example**:
-
+2. **Check Status:**
 ```bash
-curl -X POST -F "file=@/path/to/sample.torrent" http://localhost:8080/api/info
+curl http://localhost:8080/api/torrents/download/550e8400-e29b-41d4-a716-446655440000/status
 ```
 
-**Response**:
-
-```
-Tracker URL: http://...
-Length: 123456
-Info Hash: ...
-Piece Length: ...
-Piece Hashes:
-...
-```
-
-### POST /api/download/piece/{pieceIndex}
-
-Downloads a specific piece from a `.torrent` file and returns the raw binary data.
-
-**Path Variable**: `pieceIndex` (int)
-
-**Body**: `multipart/form-data`
-
-**Form Key**: `file` (file)
-
-**Example**:
-
+3. **Download Completed File:**
 ```bash
-# Downloads piece 0 and saves it as 'piece_0.bin'
-curl -X POST -F "file=@/path/to/sample.torrent" \
-     http://localhost:8080/api/download/piece/0 \
-     --output piece_0.bin
-```
-Or you can also test with the actual torrent file:
-```bash
-curl -X POST -F "file=@big-buck-bunny.torrent" \
-     http://localhost:8080/api/download/piece/0 \
-     --output piece_0.bin
+curl http://localhost:8080/api/torrents/download/550e8400-e29b-41d4-a716-446655440000/file \
+     --output downloaded_file.txt
 ```
 
+## 🧪 Testing
 
-### POST /api/download
+### PEX Testing
+For testing Peer Exchange functionality, see [PEX_TESTING_GUIDE.md](PEX_TESTING_GUIDE.md).
 
-Downloads a complete file from a `.torrent` file.
+### General Testing
+For general testing procedures, see [TESTING.md](TESTING.md).
 
-**Body**: `multipart/form-data`
+## 🏗️ Architecture
 
-**Form Key**: `file` (file)
+The application follows a layered architecture:
 
-**Example**:
+1. **Controller Layer** (`controller/`): Handles HTTP requests and responses
+2. **Service Layer** (`service/`): Contains business logic and orchestrates operations
+3. **Protocol Layer** (`peer/`, `tracker/`): Implements BitTorrent protocol
+4. **Data Layer** (`torrent/`, `bencode/`): Handles data models and serialization
 
-```bash
-# Downloads the file specified in 'sample.torrent'
-curl -X POST -F "file=@/path/to/sample.torrent" \
-     http://localhost:8080/api/download \
-     --output downloaded_file_name.ext
-```
+For detailed architecture information, see [CONTEXT.md](CONTEXT.md).
 
-### GET /api/debug/status
+## 🔧 Backend Status
 
-Checks the seeding status for a torrent file.
+The backend is **production-ready** for frontend integration:
 
-**Query Parameter**: `path` (string) - absolute path to the `.torrent` file
+✅ **Non-blocking operations** - All long-running operations are async  
+✅ **Resource management** - Proper cleanup of connections and files  
+✅ **Thread safety** - All shared data structures are thread-safe  
+✅ **Error handling** - Proper error responses and exception handling  
+✅ **File persistence** - Files saved to permanent locations  
+✅ **Scalability** - Can handle multiple concurrent requests  
 
-**Example**:
+## 📝 Notes
 
-```bash
-# Check if seeding sample.torrent
-curl "http://localhost:8080/api/debug/status?path=/path/to/sample.torrent"
-```
-
-**Response** (if seeding):
-
-```
-Seeding: Yes | InfoHash: <info_hash_hex>
-```
-
-**Response** (if not seeding):
-
-```
-Seeding: No (Torrent not registered)
-```
-
-**Note**: After downloading a file with `/api/download` or `/api/download/piece/{pieceIndex}`, the client automatically registers the torrent for seeding and other peers can connect to download from you on port `6881`.
+- **File Storage**: All downloads are saved to `~/bittorrent-downloads/` directory
+- **Seeding**: After downloading, files automatically start seeding
+- **PEX**: Peer Exchange is enabled by default and helps discover peers without relying solely on trackers
+- **Async Downloads**: Downloads are processed asynchronously to prevent HTTP timeouts

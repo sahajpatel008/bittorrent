@@ -25,11 +25,15 @@ Request         Business Logic      Peer/Tracker         TCP/HTTP
 bittorrent/
 ├── controller/          REST endpoints (user-facing API)
 ├── service/             Business logic orchestration
+│   └── DownloadJob.java  Download job tracking for async operations
 ├── torrent/             Data models (Torrent, TorrentInfo)
 ├── tracker/             Tracker communication (get peer list)
 ├── peer/                Peer protocol implementation (download pieces)
 │   ├── Peer.java            Connection to other peer (outbound/inbound)
-│   └── PeerServer.java      Listens for incoming peer connections (port 6881)
+│   ├── PeerServer.java      Listens for incoming peer connections (port 6881)
+│   ├── SwarmManager.java    Manages known/active/dropped peers per torrent
+│   ├── PeerConnectionManager.java  Manages active peer connections
+│   └── protocol/           BitTorrent protocol messages (including PEX)
 ├── bencode/             Bencode serialization/deserialization
 ├── magnet/              Magnet link support
 └── util/                SHA-1 hashing, network utilities
@@ -141,6 +145,32 @@ peer.downloadPiece(torrentInfo, pieceIndex)
 
 **Client Bitfield Tracking**: The client maintains a `BitSet` to track which pieces have been successfully downloaded and verified. After each piece's SHA-1 hash is verified in `downloadPiece()`, the corresponding bit is set. Before uploading a piece in `handlePieceRequest()`, the client checks this bitfield to ensure it actually has the requested piece. The client also sends its bitfield to peers after the handshake completes, allowing peers to know which pieces are available for download.
 
+#### **3.4 Peer Exchange (PEX)**
+The client supports the PEX protocol extension for decentralized peer discovery.
+
+**Extension Negotiation**:
+- During handshake, peers advertise extension support via reserved bits
+- Extension handshake (message id=0) exchanges supported extension IDs
+- `ut_pex` extension ID is negotiated (typically 43)
+
+**PEX Message Flow**:
+```
+1. After connection established, send periodic PEX updates (every 15 seconds)
+2. PEX update contains:
+   - added: List of newly discovered peer addresses
+   - dropped: List of peers that disconnected
+3. On receiving PEX update:
+   - Add new peers to SwarmManager
+   - Broadcast newly discovered peers to other connected peers
+   - Exclude self and current peer from updates
+```
+
+**Key Components**:
+- `SwarmManager`: Tracks known, active, and dropped peers per torrent (thread-safe)
+- `PeerConnectionManager`: Manages active peer connections and broadcasts PEX updates
+- `Peer.runPexUpdateLoop()`: Daemon thread that sends periodic PEX updates
+- Rate limiting prevents sending duplicate peers too frequently
+
 ### 4. **PeerServer** (`peer/`)
 **Purpose**: Listen for inbound peer connections and handle seeding
 
@@ -181,22 +211,80 @@ PeerServer: {
 - After `downloadPiece()` or `downloadFile()`, service calls `peerServer.registerTorrent()`
 - Lifecycle managed by Spring: starts on app startup, stops on shutdown
 
-### 5. **BitTorrentService** (`service/`)
+### 5. **SwarmManager** (`peer/`)
+**Purpose**: Manages peer swarm state per torrent (thread-safe)
+
+**Architecture**:
+```java
+SwarmManager: {
+  swarms: ConcurrentHashMap<String, SwarmState>  // InfoHash -> State
+  
+  SwarmState: {
+    knownPeers: ConcurrentHashMap.newKeySet()     // All known peers
+    activePeers: ConcurrentHashMap.newKeySet()    // Currently connected
+    droppedPeers: ConcurrentHashMap.newKeySet()  // Recently disconnected
+    lastSentTime: ConcurrentHashMap<Address, Long> // Rate limiting
+  }
+}
+```
+
+**Key Methods**:
+- `registerTrackerPeers()`: Add peers from tracker announcement
+- `onPexPeersDiscovered()`: Add peers discovered via PEX
+- `registerActivePeer()`: Mark peer as active
+- `unregisterActivePeer()`: Mark peer as dropped
+- `acquirePeers()`: Get peers for connection (excludes active)
+- `getPeersForPex()`: Get peers suitable for PEX update
+- `isPeerKnown()`: Check if peer is already in swarm
+
+### 6. **PeerConnectionManager** (`peer/`)
+**Purpose**: Manages active peer connections and facilitates PEX broadcasting
+
+**Architecture**:
+```java
+PeerConnectionManager: {
+  activeConnections: ConcurrentHashMap<String, List<Peer>>  // InfoHash -> Peers
+}
+```
+
+**Key Methods**:
+- `registerConnection()`: Add peer to active connections
+- `unregisterConnection()`: Remove peer from active connections
+- `broadcastPexUpdate()`: Send PEX update to all connected peers
+- `broadcastNewPeers()`: Broadcast newly discovered peers (filters duplicates)
+
+### 7. **BitTorrentService** (`service/`)
 **Purpose**: Orchestrate operations, called by REST controllers
 
 **Key methods**:
-- `decode(String)`: Bencode → JSON
-- `getInfo(String)`: Parse .torrent file
-- `getPeers(String)`: Tracker announce → peer list
-- `handshake(String, String)`: Connect to peer, return peer_id
-- `downloadPiece(String, int)`: Full piece download from first available peer, register for seeding
-- `downloadFile(String)`: Download entire file, register for seeding
-- `getSeedingStatus(String)`: Check if seeding a torrent (debug endpoint)
+- `loadTorrent(String)`: Parse .torrent file
+- `downloadPiece(String, int)`: Download single piece from peers
+- `startDownload(String, String)`: Start async download job (returns job ID)
+- `getDownloadJob(String)`: Get download job status
+- `downloadFile(String)`: Legacy synchronous download (CLI compatibility)
+- `seed(String, String)`: Register file for seeding (non-blocking)
+
+**Async Download Flow**:
+```
+1. startDownload() creates DownloadJob with unique job ID
+2. Downloads processed in background via ExecutorService
+3. Progress tracked: completedPieces / totalPieces
+4. Files saved to ~/bittorrent-downloads/ (permanent storage)
+5. Peer connections closed after download completes
+6. File automatically registered for seeding via PeerServer
+```
+
+**DownloadJob** (`service/DownloadJob.java`):
+- Tracks download status (PENDING, DOWNLOADING, COMPLETED, FAILED)
+- Stores progress (completed pieces, total pieces, percentage)
+- Links to downloaded file when complete
+- Thread-safe status updates
 
 **Seeding Integration**:
-- After successful download, `downloadPiece()` and `downloadFile()` call `peerServer.registerTorrent()`
-- This makes the downloaded content available for other peers to download
+- After successful download, files are automatically registered with `peerServer.registerTorrent()`
+- Files saved to permanent location: `~/bittorrent-downloads/`
 - Seeding continues as long as Spring Boot application is running
+- Peer connections are properly cleaned up after downloads
 
 ### 5. **BencodeDeserializer** (`bencode/`)
 **Purpose**: Parse .torrent files (bencoded format)
@@ -213,7 +301,7 @@ PeerServer: {
 
 ### Example 1: Download a Piece
 ```
-POST /api/download/piece/0 (with sample.torrent)
+POST /api/torrents/download/piece/0 (with sample.torrent)
     ↓
 BitTorrentController.downloadPiece()
     ↓
@@ -221,31 +309,55 @@ BitTorrentService.downloadPiece(path, 0)
     ↓
 1. Load & parse .torrent file → Torrent object
 2. TrackerClient.announce(torrent) → Get peer list
-3. Connect to first peer → Peer.connect() → handshake
-4. peer.downloadPiece(torrentInfo, 0)
+3. SwarmManager.registerTrackerPeers() → Add to known peers
+4. Connect to first peer → Peer.connect() → handshake
+5. Extension negotiation → PEX support advertised
+6. peer.downloadPiece(torrentInfo, 0)
    a. awaitBitfield() → peer sends which pieces they have
    b. sendInterested() → wait for Unchoke
    c. Send Request for each 16KB block
    d. Receive Piece messages
    e. Verify SHA-1 hash
-5. Write bytes to temp file
-6. Return file to user
+7. Return piece data to user
 ```
 
-### Example 2: Handshake Only
+### Example 1b: Async Download Complete File
 ```
-GET /api/handshake?peer=167.99.63.30:6881&file=/path/to/file.torrent
+POST /api/torrents/download (with sample.torrent)
     ↓
-BitTorrentService.handshake(path, peerIpAndPort)
+BitTorrentController.startDownload()
     ↓
-1. Load .torrent → get info_hash
-2. Open TCP socket to peer
-3. Peer.connect(socket, torrent)
-   - Send: [19][protocol][reserved][info_hash][peer_id]
-   - Recv: [19][protocol][reserved][info_hash][peer_id]
-   - Verify info_hash matches
-4. Return peer_id as hex string
-5. Close connection
+BitTorrentService.startDownload(path, fileName)
+    ↓
+1. Create DownloadJob with unique job ID
+2. Return job ID immediately (202 Accepted)
+3. Background thread:
+   a. Load torrent, get peers from tracker/PEX
+   b. Connect to multiple peers (round-robin)
+   c. Download all pieces in parallel
+   d. Write to ~/bittorrent-downloads/{fileName}
+   e. Update job status: COMPLETED
+   f. Close peer connections
+   g. Register file for seeding
+4. Client polls GET /api/torrents/download/{jobId}/status
+5. When complete, GET /api/torrents/download/{jobId}/file
+```
+
+### Example 2: Start Seeding
+```
+POST /api/torrents/seed (with torrent file and data file)
+    ↓
+BitTorrentController.startSeeding()
+    ↓
+BitTorrentService.seed(torrentPath, filePath)
+    ↓
+1. Load & parse .torrent file → Torrent object
+2. Save data file to ~/bittorrent-downloads/ (permanent location)
+3. peerServer.registerTorrent(torrentInfo, file)
+4. TrackerClient.announce(torrent) → Announce to tracker
+5. Return immediately (non-blocking)
+6. PeerServer handles incoming connections in background
+7. Peers can now download pieces from this client
 ```
 
 ---
@@ -260,12 +372,19 @@ BitTorrentService.handshake(path, peerIpAndPort)
 `MessageDescriptors` class provides registry pattern for serializing/deserializing messages by type ID (0-20). Each message type has a descriptor with serialize/deserialize functions.
 
 ### Extension Protocol
-For magnet links (no metadata available initially):
-1. Set bit 20 in handshake reserved bytes
-2. Send extension handshake with `ut_metadata` support
-3. Request metadata pieces from peer
-4. Reconstruct TorrentInfo from metadata
-5. Proceed with normal download
+The client supports two extensions:
+1. **ut_metadata**: For magnet links (no metadata available initially)
+   - Set bit 20 in handshake reserved bytes
+   - Send extension handshake with `ut_metadata` support
+   - Request metadata pieces from peer
+   - Reconstruct TorrentInfo from metadata
+   - Proceed with normal download
+
+2. **ut_pex** (Peer Exchange): For decentralized peer discovery
+   - Negotiated during extension handshake
+   - Periodic PEX updates (every 15 seconds)
+   - Exchanges peer addresses between connected peers
+   - Reduces dependency on trackers
 
 ### Compact Peer Format
 Tracker returns peers as binary string:
@@ -293,49 +412,59 @@ Example: `[192.168.1.100][6881][10.0.0.5][51413]...`
 Use sample.torrent with these endpoints:
 ```bash
 # Get torrent info
-curl -X POST -F "file=@sample.torrent" http://localhost:8080/api/info
+curl -X POST -F "file=@sample.torrent" http://localhost:8080/api/torrents/info
 
 # Download piece 0
-curl -X POST -F "file=@sample.torrent" http://localhost:8080/api/download/piece/0 --output piece_0.bin
+curl -X POST -F "file=@sample.torrent" http://localhost:8080/api/torrents/download/piece/0 --output piece_0.bin
+
+# Start async download
+curl -X POST -F "file=@sample.torrent" http://localhost:8080/api/torrents/download
+
+# Check download status (use jobId from previous response)
+curl http://localhost:8080/api/torrents/download/{jobId}/status
 ```
 
 ---
 
+## Implemented Features
+
+✅ **Multi-peer downloads**: Downloads pieces from multiple peers in parallel using round-robin scheduling.
+
+✅ **Peer Exchange (PEX)**: Fully implemented PEX protocol for decentralized peer discovery, reducing tracker dependency.
+
+✅ **Async downloads**: Downloads are processed asynchronously with job tracking, preventing HTTP timeouts.
+
+✅ **Thread-safe operations**: All shared data structures use `ConcurrentHashMap` for safe concurrent access.
+
+✅ **Resource management**: Peer connections are properly closed after downloads complete.
+
+✅ **Permanent file storage**: All downloads saved to `~/bittorrent-downloads/` directory, persisting across restarts.
+
+✅ **Peer connection tracking**: `PeerConnectionManager` tracks active connections and facilitates PEX broadcasting.
+
+✅ **Swarm management**: `SwarmManager` tracks known, active, and dropped peers per torrent (thread-safe).
+
 ## Missing Implementations (TODOs)
 
-1.  **Multi-peer downloads**: Only uses first peer. Should parallelize across multiple peers for faster downloads.
+1.  **Resume capability**: No state persistence for partial downloads. If app restarts, must start over.
 
-2.  **Peer selection**: No smart peer selection (fastest, closest, etc.). Currently just uses first peer from tracker response.
+2.  **Persistent seeding state**: Seeding state is lost on app restart. Need to save/restore registered torrents on startup.
 
-3.  **Resume capability**: No state persistence for partial downloads. If app restarts, must start over.
+3.  **Multi-file torrent support**: Only single-file torrents work. Need `FileManager` abstraction for multi-file torrents.
 
-4.  **Persistent seeding state**: Seeding state is lost on app restart. Need to save/restore registered torrents.
+4.  **Smart peer selection**: No intelligent peer selection (fastest, closest, etc.). Currently uses round-robin.
 
-5.  **Multi-file torrent support**: Only single-file torrents work. Need `FileManager` abstraction for multi-file.
+5.  **Stop seeding endpoint**: `DELETE /api/torrents/{infoHash}` endpoint exists but not fully implemented.
 
-6.  **GET /api/peers endpoint**: Service method exists but no controller endpoint.
-
-7.  **Peer connection lifecycle**: Inbound peer connections from `PeerServer.handleConnection()` are not tracked. Should maintain list of active peers for proper cleanup.
+6.  **Active torrents list**: `GET /api/torrents` returns empty list. Need to track and return active torrents.
 
 ---
 
 ## Next Steps (Prioritized Roadmap)
 
-### Phase 1: Critical Fixes (Week 1)
+### Phase 1: Enhancements (Future)
 
-#### 1. Fix Peer Connection Lifecycle ⚠️ **HIGH PRIORITY**
-**Problem**: Resource leak - inbound peers are never tracked or cleaned up.
-
-**Implementation**:
-- Add `Map<String, Peer> activePeers` to `PeerServer`
-- Track peers in `handleConnection()` after creation
-- Monitor connection status in background thread
-- Remove from map when connection closes
-- Implement proper cleanup in `stop()`
-
-**Files to modify**: `PeerServer.java`, `Peer.java` (add connection monitoring)
-
-#### 2. Persistent Seeding State
+#### 1. Persistent Seeding State
 **Problem**: Seeding state lost on app restart.
 
 **Implementation**:
@@ -347,6 +476,18 @@ curl -X POST -F "file=@sample.torrent" http://localhost:8080/api/download/piece/
 
 **Files to create**: `SeedingStateManager.java`  
 **Files to modify**: `BitTorrentService.java`, `PeerServer.java`
+
+#### 2. Resume Capability
+**Problem**: No state persistence for partial downloads.
+
+**Implementation**:
+- Save download progress to disk (piece bitfield)
+- On restart, check for partial files
+- Resume from last completed piece
+- Update `DownloadJob` to support resume
+
+**Files to create**: `DownloadStateManager.java`
+**Files to modify**: `BitTorrentService.java`, `DownloadJob.java`
 
 ---
 

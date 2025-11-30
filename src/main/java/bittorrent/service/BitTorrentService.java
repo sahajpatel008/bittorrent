@@ -13,6 +13,11 @@ import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
@@ -43,10 +48,23 @@ public class BitTorrentService {
 	private final HexFormat hexFormat = BitTorrentApplication.HEX_FORMAT;
 	private final PeerServer peerServer;
 	private final BitTorrentConfig config;
+	
+	// Download job tracking
+	private final Map<String, DownloadJob> downloadJobs = new ConcurrentHashMap<>();
+	private final ExecutorService downloadExecutor = Executors.newCachedThreadPool();
+	
+	// Default download directory
+	private static final String DEFAULT_DOWNLOAD_DIR = System.getProperty("user.home") + "/bittorrent-downloads";
 
 	public BitTorrentService(PeerServer peerServer, BitTorrentConfig config) {
 		this.peerServer = peerServer;
 		this.config = config;
+		
+		// Create download directory if it doesn't exist
+		File downloadDir = new File(DEFAULT_DOWNLOAD_DIR);
+		if (!downloadDir.exists()) {
+			downloadDir.mkdirs();
+		}
 	}
 
 	@PostConstruct
@@ -57,6 +75,181 @@ public class BitTorrentService {
 	@PreDestroy
 	public void cleanup() {
 		peerServer.stop();
+		downloadExecutor.shutdown();
+	}
+	
+	/**
+	 * Start an asynchronous download job.
+	 * Returns immediately with a job ID.
+	 */
+	public String startDownload(String torrentPath, String outputFileName) {
+		try {
+			final var torrent = load(torrentPath);
+			final var torrentInfo = torrent.info();
+			final String infoHashHex = hexFormat.formatHex(torrentInfo.hash());
+			
+			// Create download job
+			DownloadJob job = new DownloadJob(infoHashHex, outputFileName);
+			job.setTotalPieces(torrentInfo.pieces().size());
+			job.setStatus(DownloadJob.Status.DOWNLOADING);
+			
+			// Create output file in download directory
+			File outputFile = new File(DEFAULT_DOWNLOAD_DIR, outputFileName);
+			if (outputFile.exists()) {
+				// If file exists, add timestamp to avoid conflicts
+				String baseName = outputFileName;
+				int lastDot = baseName.lastIndexOf('.');
+				if (lastDot > 0) {
+					String name = baseName.substring(0, lastDot);
+					String ext = baseName.substring(lastDot);
+					outputFile = new File(DEFAULT_DOWNLOAD_DIR, name + "_" + System.currentTimeMillis() + ext);
+				} else {
+					outputFile = new File(DEFAULT_DOWNLOAD_DIR, baseName + "_" + System.currentTimeMillis());
+				}
+			}
+			
+			// Make final reference for lambda
+			final File finalOutputFile = outputFile;
+			
+			// Start async download
+			CompletableFuture<File> future = CompletableFuture.supplyAsync(() -> {
+				try {
+					return downloadFileInternal(torrent, torrentInfo, finalOutputFile, job);
+				} catch (Exception e) {
+					job.setStatus(DownloadJob.Status.FAILED);
+					job.setErrorMessage(e.getMessage());
+					throw new RuntimeException(e);
+				}
+			}, downloadExecutor);
+			
+			job.setFuture(future);
+			future.whenComplete((file, throwable) -> {
+				if (throwable != null) {
+					job.setStatus(DownloadJob.Status.FAILED);
+					job.setErrorMessage(throwable.getMessage());
+				} else {
+					job.setStatus(DownloadJob.Status.COMPLETED);
+					job.setDownloadedFile(file);
+				}
+			});
+			
+			downloadJobs.put(job.getJobId(), job);
+			return job.getJobId();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed to start download: " + e.getMessage(), e);
+		}
+	}
+	
+	/**
+	 * Get download job status.
+	 */
+	public DownloadJob getDownloadJob(String jobId) {
+		return downloadJobs.get(jobId);
+	}
+	
+	/**
+	 * Internal download method that handles the actual download process.
+	 */
+	private File downloadFileInternal(Torrent torrent, TorrentInfo torrentInfo, File outputFile, DownloadJob job) 
+			throws IOException, InterruptedException {
+		final String infoHashHex = hexFormat.formatHex(torrentInfo.hash());
+		final SwarmManager swarmManager = SwarmManager.getInstance();
+		
+		// Register file for seeding (even if incomplete, we can serve pieces we have)
+		peerServer.registerTorrent(torrentInfo, outputFile);
+
+		// 1) Ensure we have some peers in the swarm
+		final int MIN_KNOWN_PEERS = 3;
+		java.util.List<java.net.InetSocketAddress> candidatePeers =
+			swarmManager.acquirePeers(infoHashHex, MIN_KNOWN_PEERS);
+
+		if (candidatePeers.size() < MIN_KNOWN_PEERS) {
+			final var response = trackerClient.announce(torrent);
+			final var trackerPeers = response.peers().stream()
+				.filter(p -> p.getPort() != config.getListenPort())
+				.toList();
+
+			if (trackerPeers.isEmpty() && candidatePeers.isEmpty()) {
+				throw new IOException("No other peers returned by tracker or PEX.");
+			}
+
+			swarmManager.registerTrackerPeers(infoHashHex, trackerPeers, config.getListenPort());
+			candidatePeers = swarmManager.acquirePeers(
+				infoHashHex,
+				Math.min(5, Math.max(MIN_KNOWN_PEERS, trackerPeers.size()))
+			);
+			
+			// Broadcast new peers via PEX
+			if (!trackerPeers.isEmpty()) {
+				PeerConnectionManager.getInstance().broadcastNewPeers(infoHashHex, trackerPeers);
+			}
+		}
+
+		// 2) Connect to peers
+		final int maxPeers = Math.min(3, candidatePeers.size());
+
+		if (candidatePeers.isEmpty() || maxPeers == 0) {
+			throw new IOException("No candidate peers available for connection.");
+		}
+
+		final var peers = new java.util.ArrayList<Peer>();
+		try {
+			for (var addr : candidatePeers) {
+				try {
+					var peer = Peer.connect(addr, torrent, torrentInfo, outputFile, config.getPeerId());
+					peers.add(peer);
+					swarmManager.registerActivePeer(infoHashHex, addr);
+				} catch (IOException e) {
+					System.err.println("Failed to connect to peer " + addr + ": " + e.getMessage());
+					swarmManager.unregisterActivePeer(infoHashHex, addr);
+				}
+			}
+
+			if (peers.isEmpty()) {
+				throw new IOException("Could not connect to any peers.");
+			}
+			
+			job.setActivePeers(peers);
+
+			// 3) Download pieces
+			final int pieceCount = torrentInfo.pieces().size();
+			final var pieceData = new byte[pieceCount][];
+
+			for (int pieceIndex = 0; pieceIndex < pieceCount; pieceIndex++) {
+				// Pick a peer in round-robin fashion
+				Peer peer = peers.get(pieceIndex % peers.size());
+				byte[] data = peer.downloadPiece(torrentInfo, pieceIndex);
+				pieceData[pieceIndex] = data;
+				job.setCompletedPieces(pieceIndex + 1);
+			}
+
+			// 4) Write all pieces to file
+			try (final var fileOutputStream = new FileOutputStream(outputFile)) {
+				for (int i = 0; i < pieceCount; i++) {
+					fileOutputStream.write(pieceData[i]);
+				}
+			}
+
+			// Inform tracker that we now have the full file
+			trackerClient.announce(torrent, config.getListenPort(), 0L);
+			
+			System.out.println("Download complete: " + outputFile.getAbsolutePath());
+			
+			return outputFile;
+		} finally {
+			// Close peer connections after download completes
+			// Note: If we want to continue seeding, we should keep connections open
+			// For now, we close them and rely on PeerServer for incoming connections
+			for (Peer peer : peers) {
+				try {
+					peer.close();
+					swarmManager.unregisterActivePeer(infoHashHex, peer.getRemoteAddress());
+				} catch (Exception e) {
+					System.err.println("Error closing peer: " + e.getMessage());
+				}
+			}
+			job.setActivePeers(null);
+		}
 	}
 
     // --- Debug / Status Methods ---
@@ -175,8 +368,8 @@ public class BitTorrentService {
 		trackerClient.announce(torrent, config.getListenPort());
 		System.out.println("Announced to tracker on port " + config.getListenPort() + ". Seeding...");
 
-		// Keep this process alive so other peers can connect
-		Thread.currentThread().join();
+		// Note: Seeding continues in background via PeerServer
+		// No need to block - the application stays running and PeerServer handles connections
 	}
 
 	/**
@@ -409,115 +602,36 @@ public class BitTorrentService {
 		}
 	}
 
-	// Changed to return File to match Controller expectation (Controller expects FileSystemResource... wait, 
-    // I changed Controller to use FileSystemResource for downloadFile and ByteArrayResource for downloadPiece.
+	/**
+	 * Legacy synchronous download method (kept for CLI compatibility).
+	 * For REST API, use startDownload() instead.
+	 */
 	public File downloadFile(String path) throws IOException, InterruptedException {
 		final var torrent = load(path);
 		final var torrentInfo = torrent.info();
-
-		final var tempFile = File.createTempFile("bittorrent-download-", ".tmp");
-		peerServer.registerTorrent(torrentInfo, tempFile);
-
-		final String infoHashHex = hexFormat.formatHex(torrentInfo.hash());
-		final SwarmManager swarmManager = SwarmManager.getInstance();
-
-		// 1) Ensure we have some peers in the swarm. Prefer tracker when we
-		// have too few known peers, otherwise rely on PEX / existing state.
-		final int MIN_KNOWN_PEERS = 3;
-		java.util.List<java.net.InetSocketAddress> candidatePeers =
-			swarmManager.acquirePeers(infoHashHex, MIN_KNOWN_PEERS);
-
-		if (candidatePeers.size() < MIN_KNOWN_PEERS) {
-			final var response = trackerClient.announce(torrent);
-			final var trackerPeers = response.peers().stream()
-				.filter(p -> p.getPort() != config.getListenPort()) // avoid connecting to ourselves
-				.toList();
-
-			if (trackerPeers.isEmpty() && candidatePeers.isEmpty()) {
-				System.out.println("No other peers returned by tracker or PEX.");
-				return null;
-			}
-
-			swarmManager.registerTrackerPeers(infoHashHex, trackerPeers, config.getListenPort());
-			candidatePeers = swarmManager.acquirePeers(
-				infoHashHex,
-				Math.min(5, Math.max(MIN_KNOWN_PEERS, trackerPeers.size()))
-			);
-			
-			// Broadcast new peers via PEX to all connected peers
-			if (!trackerPeers.isEmpty()) {
-				PeerConnectionManager.getInstance().broadcastNewPeers(infoHashHex, trackerPeers);
+		
+		// Generate output filename from torrent
+		String fileName = torrentInfo.name() != null ? torrentInfo.name() : "download";
+		File outputFile = new File(DEFAULT_DOWNLOAD_DIR, fileName);
+		
+		// If file exists, add timestamp
+		if (outputFile.exists()) {
+			String baseName = fileName;
+			int lastDot = baseName.lastIndexOf('.');
+			if (lastDot > 0) {
+				String name = baseName.substring(0, lastDot);
+				String ext = baseName.substring(lastDot);
+				outputFile = new File(DEFAULT_DOWNLOAD_DIR, name + "_" + System.currentTimeMillis() + ext);
+			} else {
+				outputFile = new File(DEFAULT_DOWNLOAD_DIR, baseName + "_" + System.currentTimeMillis());
 			}
 		}
-
-		// 2) Connect to a small number of peers in parallel
-		final int maxPeers = Math.min(3, candidatePeers.size());
-
-		if (candidatePeers.isEmpty() || maxPeers == 0) {
-			System.out.println("No candidate peers available for connection.");
-			return null;
-		}
-
-		final var peers = new java.util.ArrayList<Peer>();
-		try {
-			for (var addr : candidatePeers) {
-				try {
-					var peer = Peer.connect(addr, torrent, torrentInfo, tempFile, config.getPeerId());
-					peers.add(peer);
-					swarmManager.registerActivePeer(infoHashHex, addr);
-					
-					// Send initial PEX update after connection is established
-					// This will happen automatically via the periodic thread, but we can also trigger it
-					// after a short delay to let the connection stabilize
-				} catch (IOException e) {
-					System.err.println("Failed to connect to peer " + addr + ": " + e.getMessage());
-					// Mark as dropped if connection fails
-					swarmManager.unregisterActivePeer(infoHashHex, addr);
-				}
-			}
-
-			if (peers.isEmpty()) {
-				System.out.println("Could not connect to any peers.");
-				return null;
-			}
-
-			// 3) Very simple multi-peer scheduler: assign pieces round-robin
-			final int pieceCount = torrentInfo.pieces().size();
-			final var pieceData = new byte[pieceCount][];
-
-			for (int pieceIndex = 0; pieceIndex < pieceCount; pieceIndex++) {
-				// Pick a peer in round-robin fashion
-				Peer peer = peers.get(pieceIndex % peers.size());
-				byte[] data = peer.downloadPiece(torrentInfo, pieceIndex);
-				pieceData[pieceIndex] = data;
-			}
-
-			// 4) Write all pieces to the temp file
-			try (final var fileOutputStream = new FileOutputStream(tempFile)) {
-				for (int i = 0; i < pieceCount; i++) {
-					fileOutputStream.write(pieceData[i]);
-				}
-			}
-
-			// Inform tracker that we now have the full file (left=0)
-			trackerClient.announce(torrent, config.getListenPort(), 0L);
-			
-			System.out.println("Download complete. Continuing to seed...");
-
-			// Don't close peer connections - keep them alive for PEX and seeding
-			// The peers will remain active and continue exchanging PEX updates
-			// They will be closed when the process exits or when explicitly closed
-
-			return tempFile;
-		} catch (Exception e) {
-			// On error, close peers
-			for (int i = 0; i < peers.size(); i++) {
-				Peer p = peers.get(i);
-				try {
-					p.close();
-				} catch (Exception ignored) {}
-			}
-			throw e;
-		}
+		
+		// Create a dummy job for tracking
+		DownloadJob job = new DownloadJob(hexFormat.formatHex(torrentInfo.hash()), fileName);
+		job.setTotalPieces(torrentInfo.pieces().size());
+		job.setStatus(DownloadJob.Status.DOWNLOADING);
+		
+		return downloadFileInternal(torrent, torrentInfo, outputFile, job);
 	}
 }
