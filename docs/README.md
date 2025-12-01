@@ -114,6 +114,28 @@ mvn clean package
 java -jar target/java_bittorrent.jar <command> <args>
 ```
 
+## 🎛️ React Control Center
+
+`react-frontend/` hosts a Vite + React SPA tailored to BitTorrent workflows:
+
+Highlights:
+- **Torrent Analyzer** – drag a `.torrent` into the analyzer to preview announce URLs, info hash, piece sizes, and totals before launching a job.
+- **Download Manager** – start asynchronous downloads, jump straight into telemetry for the new job, and stream progress via SSE.
+- **Active Transfers** – auto-refreshing table that merges downloading and seeding torrents, showing speeds, completion, and quick Inspect actions.
+- **Job Drawer** – floating telemetry panel with per-peer throughput, choke/interested flags, piece-source history, and links to fetch the completed payload when ready.
+- **Peer & Tracker Tools** – fetch swarm membership for any info hash or manually inject a peer to bootstrap when trackers are down.
+- **Seeding Station** – pair a local payload with metadata, announce to the tracker, and watch it appear in the Transfers table.
+
+### Running the React UI
+
+```bash
+cd react-frontend
+npm install
+npm run dev
+```
+
+By default Vite proxies `/api` to the BitTorrent service on `http://localhost:8081` (the tracker continues to run on `8080`). Ensure both servers are up, then run `npm run build` for a production bundle when you’re ready to deploy.
+
 ## 📖 API Endpoints
 
 For complete API documentation, see [API_ENDPOINTS.md](API_ENDPOINTS.md).

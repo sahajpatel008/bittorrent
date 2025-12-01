@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BitTorrent Control Center</title>
+    <link rel="stylesheet" href="styles.css">
+    <script type="module" src="app.js" defer></script>
+</head>
+<body>
+    <div class="app-shell">
+        <header class="hero">
+            <div>
+                <p class="eyebrow">Distributed Systems · BitTorrent Client</p>
+                <h1>BitTorrent Control Center</h1>
+                <p class="subtitle">
+                    Inspect torrent metadata, orchestrate downloads, manage seeding sessions, and watch swarms evolve in real time.
+                </p>
+            </div>
+            <div class="status-block">
+                <span id="serviceStatus" class="status-indicator status-offline">Backend offline</span>
+                <button id="refreshHealthBtn" class="ghost-button">Re-check</button>
+            </div>
+        </header>
+
+        <main class="content-grid">
+            <section class="card span-2">
+                <div class="section-heading">
+                    <div>
+                        <h2>Torrent Analyzer</h2>
+                        <p>Drop a <code>.torrent</code> file to inspect announce URLs, piece counts, and info hash.</p>
+                    </div>
+                    <button id="clearInfoBtn" class="ghost-button">Clear</button>
+                </div>
+                <form id="torrentInfoForm" class="form-grid">
+                    <label class="dropzone">
+                        <input type="file" id="torrentInfoFile" name="file" accept=".torrent" required>
+                        <span>Select or drop a torrent file</span>
+                    </label>
+                    <button type="submit" class="primary">Analyze Torrent</button>
+                </form>
+                <div id="torrentInfoResult" class="info-grid"></div>
+            </section>
+
+            <section class="card">
+                <div class="section-heading">
+                    <h2>Start Download</h2>
+                    <p>Launch an async job and stream progress via SSE.</p>
+                </div>
+                <form id="downloadForm" class="form-grid">
+                    <label>
+                        <span class="label">Torrent file</span>
+                        <input type="file" id="downloadTorrentFile" name="file" accept=".torrent" required>
+                    </label>
+                    <label>
+                        <span class="label">Output filename (optional)</span>
+                        <input type="text" id="outputFileName" placeholder="Will default to torrent name">
+                    </label>
+                    <button type="submit" class="primary">Start Download</button>
+                </form>
+                <div id="downloadFeedback" class="feedback"></div>
+            </section>
+
+            <section class="card">
+                <div class="section-heading">
+                    <h2>Active Transfers</h2>
+                    <p>All downloading and seeding torrents tracked by the backend.</p>
+                </div>
+                <div id="activeTorrentsContainer" class="table-scroll"></div>
+                <div class="actions-row">
+                    <button id="refreshTorrentsBtn" class="ghost-button">Refresh List</button>
+                    <label class="inline-field">
+                        Auto refresh
+                        <input type="checkbox" id="autoRefreshToggle" checked>
+                    </label>
+                </div>
+            </section>
+
+            <section class="card span-2">
+                <div class="section-heading">
+                    <h2>Job Telemetry</h2>
+                    <p>Select a download job from the table to inspect live metrics, peers, and source map.</p>
+                </div>
+                <div id="jobDetails" class="job-details">
+                    <p>No job selected yet.</p>
+                </div>
+            </section>
+
+            <section class="card">
+                <div class="section-heading">
+                    <h2>Peer &amp; Tracker Tools</h2>
+                    <p>Inspect swarms or manually bootstrap peers when trackers misbehave.</p>
+                </div>
+                <form id="peerInspectorForm" class="form-grid compact">
+                    <label>
+                        <span class="label">Info hash (hex)</span>
+                        <input type="text" id="peerInspectorHash" placeholder="e.g. 0123abcd..." required>
+                    </label>
+                    <button type="submit" class="ghost-button">Fetch Peers</button>
+                </form>
+                <div id="peerInspectorResult" class="info-grid small"></div>
+                <hr>
+                <form id="addPeerForm" class="form-grid compact">
+                    <label>
+                        <span class="label">Info hash</span>
+                        <input type="text" id="addPeerHash" required>
+                    </label>
+                    <label>
+                        <span class="label">Peer IP</span>
+                        <input type="text" id="addPeerIp" placeholder="192.168.1.20" required>
+                    </label>
+                    <label>
+                        <span class="label">Peer port</span>
+                        <input type="number" id="addPeerPort" min="1" max="65535" value="6881" required>
+                    </label>
+                    <button type="submit" class="primary">Add Peer</button>
+                </form>
+                <div id="addPeerResult" class="feedback"></div>
+            </section>
+
+            <section class="card">
+                <div class="section-heading">
+                    <h2>Seeding Station</h2>
+                    <p>Connect a payload to its torrent metadata and announce yourself to the swarm.</p>
+                </div>
+                <form id="seedForm" class="form-grid">
+                    <label>
+                        <span class="label">Torrent file</span>
+                        <input type="file" id="seedTorrentFile" name="torrent" accept=".torrent" required>
+                    </label>
+                    <label>
+                        <span class="label">Data file</span>
+                        <input type="file" id="seedDataFile" name="file" required>
+                    </label>
+                    <button type="submit" class="primary">Start Seeding</button>
+                </form>
+                <div id="seedResult" class="feedback"></div>
+            </section>
+        </main>
+    </div>
+
+    <div id="alertTray" class="alert-tray"></div>
+</body>
+</html>
