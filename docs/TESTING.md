@@ -1,265 +1,332 @@
 # BitTorrent P2P Testing Guide
 
-This document describes how to test the complete BitTorrent peer-to-peer file transfer flow using the tracker, seeder, and leecher components.
+This document describes how to test the complete BitTorrent peer-to-peer file transfer flow using the tracker, multiple peers with Spring Boot backends, and React frontends.
 
 ## Prerequisites
 
 - Java 21+
 - Maven
-- 3 terminal windows
+- Node.js & npm
+- 5+ terminal windows (for full setup)
 
 ## Architecture Overview
 
 ```
-┌─────────────────┐
-│     Tracker     │
-│   (Port 8080)   │
-└────────┬────────┘
-         │
-    Announce/
-    Peer Discovery
-         │
-    ┌────┴────┐
-    │         │
-    ▼         ▼
-┌─────────┐  ┌─────────┐
-│ Seeder  │  │ Leecher │
-│ (6882)  │◄─┤ (6883)  │
-└─────────┘  └─────────┘
-    Peer-to-Peer
-    File Transfer
+                    ┌─────────────────────┐
+                    │   Tracker Server    │
+                    │     (Port 8080)     │
+                    └──────────┬──────────┘
+                               │
+                    Announce / Peer Discovery
+                               │
+          ┌────────────────────┴────────────────────┐
+          │                                         │
+          ▼                                         ▼
+┌───────────────────────┐             ┌───────────────────────┐
+│      Peer 1 (Seeder)  │             │    Peer 2 (Leecher)   │
+│                       │             │                       │
+│  ┌─────────────────┐  │             │  ┌─────────────────┐  │
+│  │  Spring Boot    │  │             │  │  Spring Boot    │  │
+│  │  Backend: 8081  │  │             │  │  Backend: 8082  │  │
+│  └─────────────────┘  │             │  └─────────────────┘  │
+│                       │             │                       │
+│  ┌─────────────────┐  │  Peer-to-  │  ┌─────────────────┐  │
+│  │  BitTorrent     │◄─┼────Peer────┼─►│  BitTorrent     │  │
+│  │  Port: 6881     │  │  Transfer  │  │  Port: 6882     │  │
+│  └─────────────────┘  │             │  └─────────────────┘  │
+│                       │             │                       │
+│  ┌─────────────────┐  │             │  ┌─────────────────┐  │
+│  │  React Frontend │  │             │  │  React Frontend │  │
+│  │  Port: 5173     │  │             │  │  Port: 5174     │  │
+│  └─────────────────┘  │             │  └─────────────────┘  │
+└───────────────────────┘             └───────────────────────┘
 ```
+
+## Port Summary
+
+| Component | Port | Purpose |
+|-----------|------|---------|
+| **Tracker Server** | 8080 | HTTP announce endpoint & swarm management |
+| **Peer 1 Backend** | 8081 | REST API for Peer 1 |
+| **Peer 1 BitTorrent** | 6881 | Peer-to-peer file transfer |
+| **Peer 1 Frontend** | 5173 | Web UI for Peer 1 |
+| **Peer 2 Backend** | 8082 | REST API for Peer 2 |
+| **Peer 2 BitTorrent** | 6882 | Peer-to-peer file transfer |
+| **Peer 2 Frontend** | 5174 | Web UI for Peer 2 |
+
+---
 
 ## Step-by-Step Testing
 
 ### Step 1: Build the Project
 
 ```bash
-cd /home/sahajpatel008/Sahaj/SCU/SCU_Academics/5_2025\ Fall/CSEN317_Distributed_systems/DS_project/bt_client_made/bittorrent-java
-mvn clean package -DskipTests
+cd /path/to/bittorrent
+mvn clean compile
 ```
 
-### Step 2: Create a Test File
-
-**Option A: Small text file**
-```bash
-echo "This is a test file for BitTorrent transfer testing" > testfile.txt
-```
-
-**Option B: Larger file (recommended for multi-piece testing)**
-```bash
-# Create a 1MB file with repeated content
-yes "This is test content for BitTorrent transfer" | head -c 1048576 > testfile.txt
-```
-
-> **Note:** Default piece size is 256KB, so files smaller than that will only have 1 piece.
-
-### Step 3: Start the Tracker (Terminal 1)
+### Step 2: Start the Tracker Server (Terminal 1)
 
 ```bash
-java -cp target/java_bittorrent.jar bittorrent.tracker.server.TrackerServerApplication
+cd /path/to/bittorrent
+mvn spring-boot:run -Dspring-boot.run.main-class=bittorrent.tracker.server.TrackerServerApplication -Dspring-boot.run.arguments="--server.port=8080"
 ```
 
-Expected output:
+**Expected output:**
 ```
+Loaded X swarms from storage.
+Tomcat started on port 8080 (http) with context path ''
 Started TrackerServerApplication in X.XXX seconds
 ```
 
-The tracker runs on **port 8080** and handles:
-- Peer registration
-- Peer discovery
-- Swarm management
-
-### Step 4: Create a Torrent File
+### Step 3: Start Peer 1 - Seeder Backend (Terminal 2)
 
 ```bash
-java -jar target/java_bittorrent.jar create_torrent testfile.txt test.torrent
+cd /path/to/bittorrent
+mvn spring-boot:run -Dspring-boot.run.main-class=bittorrent.BitTorrentApplication -Dspring-boot.run.arguments="--server.port=8081 --bittorrent.listen-port=6881 --bittorrent.peer-id=42112233445566778899"
 ```
 
-This creates a `.torrent` file that:
-- Contains file metadata (name, size, piece hashes)
-- Points to the local tracker (`http://localhost:8080/announce`)
+**Expected output:**
+```
+Tomcat initialized with port 8081 (http)
+PeerServer listening on port 6881
+Started BitTorrentApplication in X.XXX seconds
+```
 
-### Step 5: Start the Seeder (Terminal 2)
+### Step 4: Start Peer 1 Frontend (Terminal 3)
 
 ```bash
-java -Dbittorrent.listen-port=6882 -jar target/java_bittorrent.jar seed test.torrent testfile.txt
+cd /path/to/bittorrent/react-frontend
+npm run dev -- --port 5173
 ```
 
-Expected output:
+**Expected output:**
 ```
+VITE v5.x.x  ready in XXX ms
+
+➜  Local:   http://localhost:5173/
+```
+
+### Step 5: Start Peer 2 - Leecher Backend (Terminal 4)
+
+```bash
+cd /path/to/bittorrent
+mvn spring-boot:run -Dspring-boot.run.main-class=bittorrent.BitTorrentApplication -Dspring-boot.run.arguments="--server.port=8082 --bittorrent.listen-port=6882 --bittorrent.peer-id=99887766554433221100"
+```
+
+**Expected output:**
+```
+Tomcat initialized with port 8082 (http)
 PeerServer listening on port 6882
-Registered torrent for seeding: <info_hash>
+Started BitTorrentApplication in X.XXX seconds
 ```
 
-The seeder:
-- Registers with the tracker
-- Starts PeerServer to accept incoming connections
-- Responds to piece requests from leechers
-
-### Step 6: Download as Leecher (Terminal 3)
-
-**Option A: Download complete file**
-```bash
-java -Dbittorrent.listen-port=6883 -jar target/java_bittorrent.jar download -o downloaded.txt test.torrent
-```
-
-**Option B: Download a single piece**
-```bash
-java -Dbittorrent.listen-port=6883 -jar target/java_bittorrent.jar download_piece -o piece0.bin test.torrent 0
-```
-
-### Step 7: Verify the Download
-
-The downloaded file is saved to the path specified with the `-o` flag (e.g., `downloaded.txt`).
+### Step 6: Start Peer 2 Frontend (Terminal 5)
 
 ```bash
-# View the downloaded file
-cat downloaded.txt
-
-# Compare with original
-diff testfile.txt downloaded.txt
-
-# Or verify using MD5 hash
-md5sum testfile.txt downloaded.txt
+cd /path/to/bittorrent/react-frontend
+VITE_API_BASE=http://localhost:8082/api npm run dev -- --port 5174
 ```
 
-If both files have the same hash, the transfer was successful!
+**Expected output:**
+```
+VITE v5.x.x  ready in XXX ms
+
+➜  Local:   http://localhost:5174/
+```
 
 ---
 
-## Understanding the Logs
+## Testing the File Transfer
 
-### Seeder Logs (Terminal 2)
+### On Peer 1 (Seeder) - http://localhost:5173
 
+1. **Create/Upload a torrent file** with a file you want to share
+2. **Start seeding** - this registers the torrent and announces to the tracker
+3. The seeder will show status: "SEEDING"
+
+### Verify Seeder Registered with Tracker
+
+```bash
+# Check tracker has the peer registered
+curl "http://localhost:8080/api/tracker/swarms/<INFO_HASH>/peers"
 ```
-Accepted connection from /127.0.0.1:32886        # Incoming connection from leecher
-Handshake successful with /127.0.0.1:32886       # Protocol handshake completed
-send: typeId=5  message=Bitfield[values.length=1] # Sent bitfield (all pieces available)
-RECV_LOOP: Interested[]                           # Leecher is interested
-send: typeId=1  message=Unchoke[]                 # Allowed leecher to download
-RECV_LOOP: Request[index=0, begin=0, length=52]   # Piece request received
-send: typeId=7  message=Piece[...]                # Sent piece data
-RECV_LOOP: Have[pieceIndex=0]                     # Leecher confirmed receipt
-Peer connection closed: /127.0.0.1:32886          # Connection closed
+
+**Expected response:**
+```json
+{
+  "peers": [{"ip": "127.0.0.1", "port": 6881, "peerId": "42112233445566778899"}],
+  "count": 1,
+  "infoHash": "<INFO_HASH>"
+}
 ```
 
-### Leecher Logs (Terminal 3)
+### Manually Register Peer with Tracker (if needed)
 
+If the automatic announce didn't work, manually register the seeder:
+
+```bash
+curl -X POST "http://localhost:8080/api/tracker/swarms/<INFO_HASH>/peers" \
+  -H "Content-Type: application/json" \
+  -d '{"ip": "127.0.0.1", "port": 6881, "peerId": "42112233445566778899"}'
 ```
-PeerServer listening on port 6883                 # Started own server
+
+### On Peer 2 (Leecher) - http://localhost:5174
+
+1. **Upload the same .torrent file**
+2. **Start download** - the leecher will:
+   - Announce to tracker
+   - Get Peer 1's address from tracker
+   - Connect to Peer 1 on port 6881
+   - Download pieces
+3. Watch the progress bar fill up!
+
+---
+
+## Verifying the Transfer
+
+### Check Active Torrents
+
+```bash
+# Peer 1 (Seeder)
+curl "http://localhost:8081/api/torrents"
+
+# Peer 2 (Leecher)  
+curl "http://localhost:8082/api/torrents"
+```
+
+### Check Tracker Swarms
+
+```bash
+curl "http://localhost:8080/api/tracker/swarms/<INFO_HASH>/peers"
+```
+
+### Compare Files
+
+After download completes, verify the files match:
+
+```bash
+md5sum original_file.mp4 downloaded_file.mp4
+# Both should show the same hash
+```
+
+---
+
+## Expected Log Flow
+
+### Tracker Logs
+```
+Tracker announce: infoHash=<HASH> ip=127.0.0.1:6881 left=0 downloaded=X uploaded=0
+Tracker announce: infoHash=<HASH> ip=127.0.0.1:6882 left=X downloaded=0 uploaded=0
+```
+
+### Seeder Logs (Peer 1)
+```
+Registered torrent for seeding: <INFO_HASH>
 Attempting to pass tracker url: http://localhost:8080/announce
-AnnounceResponse: {interval=1800, peers=...}      # Got peer list from tracker
-Peer: trying to connect: /127.0.0.1:6882          # Connecting to seeder
-RECV_LOOP: Bitfield[values.length=1]              # Received seeder's bitfield
-send: typeId=2  message=Interested[]              # Expressed interest
-send: typeId=6  message=Request[...]              # Requested piece
-RECV_LOOP: Unchoke[]                              # Seeder allowed download
-RECV_LOOP: Piece[index=0, begin=0, block.length=52] # Received piece data!
-send: typeId=4  message=Have[pieceIndex=0]        # Announced piece completion
+AnnounceResponse: {interval=1800, min interval=300, peers=...}
+Accepted connection from /127.0.0.1:XXXXX
+Handshake successful with /127.0.0.1:XXXXX
 ```
 
----
-
-## Port Assignments
-
-| Component | Port | Purpose |
-|-----------|------|---------|
-| Tracker   | 8080 | HTTP announce endpoint |
-| Seeder    | 6882 | PeerServer for incoming connections |
-| Leecher   | 6883 | PeerServer (becomes seeder after download) |
-
-> **Note:** When the leecher connects TO the seeder, the OS assigns a random ephemeral port (e.g., 32886) for the outgoing connection. This is normal TCP behavior.
+### Leecher Logs (Peer 2)
+```
+Attempting to pass tracker url: http://localhost:8080/announce
+AnnounceResponse: {interval=1800, peers=[127.0.0.1:6881]}
+Peer: trying to connect: /127.0.0.1:6881
+RECV_LOOP: Bitfield[...]
+RECV_LOOP: Piece[index=0, begin=0, block.length=...]
+```
 
 ---
 
 ## Troubleshooting
 
+### CORS Errors
+
+If you see CORS errors in the browser console, ensure `application.properties` includes:
+
+```properties
+app.cors.allowed-origins=http://localhost:5173,http://localhost:5174,http://localhost:5175
+```
+
+Then restart the backend servers.
+
+### Info Hash Mismatch (Tracker receives different hash)
+
+If tracker logs show a different info hash than peers send (e.g., `3f3f3f...` instead of `f08c83...`), this is a URL encoding issue. The fix is in `TrackerController.java` to manually decode the info_hash using ISO-8859-1.
+
+### No Peers Found
+
+1. Ensure seeder started and announced **before** leecher
+2. Check tracker has the peer:
+   ```bash
+   curl "http://localhost:8080/api/tracker/swarms/<INFO_HASH>/peers"
+   ```
+3. Manually register if needed (see above)
+
 ### Port Already in Use
 
 ```bash
 # Find process using the port
-lsof -i :6881
+lsof -i :8081
 # Kill if needed
 kill -9 <PID>
 ```
 
-### Tracker Not Responding
+### Max Upload Size Exceeded
 
-```bash
-# Test tracker directly
-curl "http://localhost:8080/announce?info_hash=test&peer_id=test&port=6881&uploaded=0&downloaded=0&left=100&compact=1"
+Add to `application.properties`:
+```properties
+spring.servlet.multipart.max-file-size=10GB
+spring.servlet.multipart.max-request-size=10GB
 ```
 
-### Check Registered Peers
+---
+
+## Quick Reference Commands
+
+### Start All Services
 
 ```bash
-# View tracker's stored data
-cat tracker_data/swarms.json
+# Terminal 1 - Tracker
+mvn spring-boot:run -Dspring-boot.run.main-class=bittorrent.tracker.server.TrackerServerApplication -Dspring-boot.run.arguments="--server.port=8080"
+
+# Terminal 2 - Peer 1 Backend
+mvn spring-boot:run -Dspring-boot.run.main-class=bittorrent.BitTorrentApplication -Dspring-boot.run.arguments="--server.port=8081 --bittorrent.listen-port=6881 --bittorrent.peer-id=42112233445566778899"
+
+# Terminal 3 - Peer 1 Frontend
+cd react-frontend && npm run dev -- --port 5173
+
+# Terminal 4 - Peer 2 Backend
+mvn spring-boot:run -Dspring-boot.run.main-class=bittorrent.BitTorrentApplication -Dspring-boot.run.arguments="--server.port=8082 --bittorrent.listen-port=6882 --bittorrent.peer-id=99887766554433221100"
+
+# Terminal 5 - Peer 2 Frontend
+cd react-frontend && VITE_API_BASE=http://localhost:8082/api npm run dev -- --port 5174
 ```
 
-### No Peers Found
+### API Endpoints
 
-- Ensure seeder started **before** leecher
-- Check that seeder successfully registered with tracker
-- Verify both using the same `.torrent` file
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/torrents` | GET | List all active torrents |
+| `/api/seed` | POST | Start seeding a file |
+| `/api/download` | POST | Start downloading a torrent |
+| `/api/tracker/swarms/{hash}/peers` | GET | Get peers for a swarm |
+| `/api/tracker/swarms/{hash}/peers` | POST | Register peer manually |
 
 ---
 
 ## Message Types Reference
 
-| Type ID | Name       | Direction | Description |
-|---------|------------|-----------|-------------|
-| 0       | Choke      | S → L     | Stop sending pieces |
-| 1       | Unchoke    | S → L     | Allow piece requests |
-| 2       | Interested | L → S     | Want to download |
-| 3       | NotInterested | L → S  | Don't need pieces |
-| 4       | Have       | Both      | Announce piece completion |
-| 5       | Bitfield   | S → L     | Available pieces bitmap |
-| 6       | Request    | L → S     | Request piece data |
-| 7       | Piece      | S → L     | Piece data response |
-| 8       | Cancel     | L → S     | Cancel pending request |
-
----
-
-## Quick Test Script
-
-```bash
-#!/bin/bash
-# test_p2p.sh - Automated P2P test
-
-JAR="target/java_bittorrent.jar"
-
-echo "=== Building ==="
-mvn clean package -DskipTests -q
-
-echo "=== Creating test file ==="
-echo "Hello BitTorrent World!" > testfile.txt
-
-echo "=== Starting Tracker ==="
-java -cp $JAR bittorrent.tracker.server.TrackerServerApplication &
-TRACKER_PID=$!
-sleep 2
-
-echo "=== Creating torrent ==="
-java -jar $JAR create_torrent testfile.txt test.torrent
-
-echo "=== Starting Seeder ==="
-java -Dbittorrent.listen-port=6882 -jar $JAR seed test.torrent testfile.txt &
-SEEDER_PID=$!
-sleep 2
-
-echo "=== Downloading ==="
-java -Dbittorrent.listen-port=6883 -jar $JAR download -o downloaded.txt test.torrent
-
-echo "=== Verifying ==="
-if diff -q testfile.txt downloaded.txt > /dev/null 2>&1; then
-    echo "✓ SUCCESS: Files match!"
-else
-    echo "✗ FAILURE: Files differ"
-fi
-
-echo "=== Cleanup ==="
-kill $SEEDER_PID $TRACKER_PID 2>/dev/null
-rm -f testfile.txt test.torrent downloaded.txt
-```
+| Type ID | Name | Direction | Description |
+|---------|------|-----------|-------------|
+| 0 | Choke | S → L | Stop sending pieces |
+| 1 | Unchoke | S → L | Allow piece requests |
+| 2 | Interested | L → S | Want to download |
+| 3 | NotInterested | L → S | Don't need pieces |
+| 4 | Have | Both | Announce piece completion |
+| 5 | Bitfield | S → L | Available pieces bitmap |
+| 6 | Request | L → S | Request piece data |
+| 7 | Piece | S → L | Piece data response |
+| 8 | Cancel | L → S | Cancel pending request |
