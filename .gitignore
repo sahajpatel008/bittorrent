@@ -6,4 +6,3 @@ target/
 .factorpath
 logs/
 bittorrent-frontend/node_modules
-bittorrent-frontend/node_modules/*
