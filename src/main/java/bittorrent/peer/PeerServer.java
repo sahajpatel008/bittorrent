@@ -70,7 +70,7 @@ public class PeerServer {
     }
 
     public void registerTorrent(TorrentInfo torrentInfo, File file) {
-        String infoHashHex = Main.HEX_FORMAT.formatHex(torrentInfo.hash());
+        String infoHashHex = Main.HEX_FORMAT.formatHex(torrentInfo.hash()).toLowerCase();
         activeTorrents.put(infoHashHex, torrentInfo);
         torrentFiles.put(infoHashHex, file);
         System.out.println("Registered torrent for seeding: " + infoHashHex);
@@ -156,7 +156,7 @@ public class PeerServer {
     }
 
     public String getTorrentStatus(byte[] infoHash) {
-        String infoHashHex = Main.HEX_FORMAT.formatHex(infoHash);
+        String infoHashHex = Main.HEX_FORMAT.formatHex(infoHash).toLowerCase();
         if (activeTorrents.containsKey(infoHashHex)) {
             // In a real implementation, we would check the actual bitfield of the file/torrent
             // For now, since we register it, we assume we are seeding it.
@@ -185,6 +185,24 @@ public class PeerServer {
      */
     public File getTorrentFile(String infoHashHex) {
         return torrentFiles.get(infoHashHex);
+    }
+
+    /**
+     * Remove a torrent from the seeding registry.
+     */
+    public boolean unregisterTorrent(String infoHashHex) {
+        if (infoHashHex == null) {
+            return false;
+        }
+        String normalized = infoHashHex.toLowerCase();
+        TorrentInfo removedInfo = activeTorrents.remove(normalized);
+        File removedFile = torrentFiles.remove(normalized);
+        if (removedInfo != null || removedFile != null) {
+            System.out.println("Unregistered torrent: " + normalized);
+            saveSeedingTorrents();
+            return true;
+        }
+        return false;
     }
 
     private void acceptLoop() {

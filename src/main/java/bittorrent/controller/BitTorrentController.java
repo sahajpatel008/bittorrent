@@ -3,6 +3,7 @@ package bittorrent.controller;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -377,12 +378,20 @@ public class BitTorrentController {
 	 */
 	@DeleteMapping("/torrents/{infoHash}")
 	public ResponseEntity<Map<String, Object>> stopSeeding(@PathVariable String infoHash) {
-		// Note: PeerServer doesn't have a method to unregister torrents yet
-		// This would need to be implemented
-		Map<String, Object> response = new HashMap<>();
-		response.put("infoHash", infoHash);
-		response.put("message", "Stop seeding not yet implemented");
-		return ResponseEntity.ok(response);
+		try {
+			boolean removed = bitTorrentService.deleteTorrent(infoHash);
+			if (!removed) {
+				return ResponseEntity.status(HttpStatus.NOT_FOUND)
+					.body(Map.of("error", "Torrent not found or already removed: " + infoHash));
+			}
+			return ResponseEntity.ok(Map.of(
+				"infoHash", infoHash,
+				"message", "Torrent removed and seeding stopped"
+			));
+		} catch (Exception e) {
+			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+				.body(Map.of("error", "Failed to delete torrent: " + e.getMessage()));
+		}
 	}
 
 	/**
@@ -530,5 +539,60 @@ public class BitTorrentController {
 		response.put("pieceSource", pieceSource);
 		
 		return ResponseEntity.ok(response);
+	}
+
+	/**
+	 * Create a .torrent file from an uploaded payload.
+	 * POST /api/torrents/create
+	 */
+	@PostMapping("/torrents/create")
+	public ResponseEntity<Resource> createTorrent(
+			@RequestParam("file") MultipartFile dataFile,
+			@RequestParam(value = "outputName", required = false) String outputName) {
+		File tempInput = null;
+		File tempOutput = null;
+		try {
+			tempInput = File.createTempFile("create-input-", ".bin");
+			dataFile.transferTo(tempInput);
+
+			tempOutput = File.createTempFile("create-output-", ".torrent");
+			bitTorrentService.createTorrent(tempInput.getAbsolutePath(), tempOutput.getAbsolutePath());
+
+			String downloadName = outputName != null && !outputName.isBlank()
+				? outputName.trim()
+				: deriveBaseName(dataFile.getOriginalFilename());
+			if (!downloadName.endsWith(".torrent")) {
+				downloadName += ".torrent";
+			}
+
+			byte[] bytes = Files.readAllBytes(tempOutput.toPath());
+			ByteArrayResource resource = new ByteArrayResource(bytes);
+
+			return ResponseEntity.ok()
+				.header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + downloadName + "\"")
+				.contentType(MediaType.APPLICATION_OCTET_STREAM)
+				.body(resource);
+		} catch (Exception e) {
+			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+				.body(new ByteArrayResource(("Failed to create torrent: " + e.getMessage()).getBytes()));
+		} finally {
+			if (tempInput != null && tempInput.exists()) {
+				tempInput.delete();
+			}
+			if (tempOutput != null && tempOutput.exists()) {
+				tempOutput.delete();
+			}
+		}
+	}
+
+	private String deriveBaseName(String original) {
+		if (original == null || original.isBlank()) {
+			return "new-torrent";
+		}
+		int dot = original.lastIndexOf('.');
+		if (dot > 0) {
+			return original.substring(0, dot);
+		}
+		return original;
 	}
 }

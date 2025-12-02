@@ -125,6 +125,7 @@ Highlights:
 - **Job Drawer** – floating telemetry panel with per-peer throughput, choke/interested flags, piece-source history, and links to fetch the completed payload when ready.
 - **Peer & Tracker Tools** – fetch swarm membership for any info hash or manually inject a peer to bootstrap when trackers are down.
 - **Seeding Station** – pair a local payload with metadata, announce to the tracker, and watch it appear in the Transfers table.
+- **Torrent Builder** – generate a `.torrent` from any payload directly in the browser; the API returns the ready-to-share torrent file.
 
 ### Running the React UI
 

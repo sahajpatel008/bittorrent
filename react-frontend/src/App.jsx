@@ -6,6 +6,7 @@ import JobDetailDrawer from "./components/JobDetailDrawer.jsx";
 import PeerTools from "./components/PeerTools.jsx";
 import SeedingStation from "./components/SeedingStation.jsx";
 import AlertStack from "./components/AlertStack.jsx";
+import TorrentCreator from "./components/TorrentCreator.jsx";
 import { request } from "./api.js";
 import useInterval from "./hooks/useInterval.js";
 
@@ -60,6 +61,36 @@ function App() {
     setSelectedJobId(jobId);
   };
 
+  const handleDeleteTorrent = useCallback(
+    async (infoHash) => {
+      if (!infoHash) return;
+      try {
+        await request(`/torrents/${infoHash}`, { method: "DELETE" });
+        let clearSelection = false;
+        setJobSnapshots((current) => {
+          const next = { ...current };
+          Object.entries(current).forEach(([jobId, snapshot]) => {
+            if ((snapshot.infoHash ?? "").toLowerCase() === infoHash.toLowerCase()) {
+              delete next[jobId];
+              if (jobId === selectedJobId) {
+                clearSelection = true;
+              }
+            }
+          });
+          return next;
+        });
+        if (clearSelection) {
+          setSelectedJobId(null);
+        }
+        pushAlert(`Removed torrent ${infoHash}`, "success");
+        refreshTorrents();
+      } catch (err) {
+        pushAlert(`Failed to remove torrent: ${err.message}`, "error");
+      }
+    },
+    [pushAlert, refreshTorrents, selectedJobId]
+  );
+
   return (
     <div className="app-shell">
       <header className="hero">
@@ -78,6 +109,7 @@ function App() {
       <main className="grid">
         <TorrentAnalyzer onInfoReady={(info) => pushAlert(`Info hash ${info.infoHash}`, "success")} pushAlert={pushAlert} />
         <DownloadManager onJobCreated={(jobId) => handleJobSelect(jobId)} pushAlert={pushAlert} />
+        <TorrentCreator pushAlert={pushAlert} />
         <ActiveTransfers
           torrents={torrents}
           loading={loadingTorrents}
@@ -86,6 +118,7 @@ function App() {
           onToggleAuto={setAutoRefresh}
           onRefresh={refreshTorrents}
           onInspect={handleJobSelect}
+          onDelete={handleDeleteTorrent}
         />
         <PeerTools pushAlert={pushAlert} />
         <SeedingStation pushAlert={pushAlert} onSeeding={() => refreshTorrents()} />

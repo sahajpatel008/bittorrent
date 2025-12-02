@@ -187,6 +187,12 @@ button {
   overflow-x: auto;
 }
 
+.row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

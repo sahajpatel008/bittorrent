@@ -81,6 +81,15 @@ public class TorrentPersistenceService {
     }
 
     /**
+     * Delete a stored torrent file
+     * @return true if a file was removed
+     */
+    public boolean deleteTorrentFile(String infoHashHex) throws IOException {
+        Path torrentPath = Path.of(TORRENTS_DIR, infoHashHex + ".torrent");
+        return Files.deleteIfExists(torrentPath);
+    }
+
+    /**
      * Save download jobs state
      */
     public void saveDownloadJobs(Map<String, DownloadJob> jobs) {
@@ -215,4 +224,3 @@ public class TorrentPersistenceService {
         public String fileName;
     }
 }
-

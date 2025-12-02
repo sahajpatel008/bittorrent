@@ -7,7 +7,8 @@ function ActiveTransfers({
   autoRefresh,
   onToggleAuto,
   onRefresh,
-  onInspect
+  onInspect,
+  onDelete
 }) {
   return (
     <section className="panel">
@@ -62,12 +63,19 @@ function ActiveTransfers({
                     </td>
                     <td>{downloadSpeed}</td>
                     <td>{torrent.type}</td>
-                    <td>
+                    <td className="row-actions">
                       {torrent.jobId && (
-                        <button className="ghost" onClick={() => onInspect(torrent.jobId)}>
+                        <button type="button" className="ghost" onClick={() => onInspect(torrent.jobId)}>
                           Inspect
                         </button>
                       )}
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => onDelete?.(torrent.infoHash)}
+                      >
+                        Remove
+                      </button>
                     </td>
                   </tr>
                 );

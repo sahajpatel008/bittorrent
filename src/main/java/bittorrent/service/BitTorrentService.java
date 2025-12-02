@@ -745,6 +745,54 @@ public class BitTorrentService {
 		System.out.println("Created torrent: " + outputPath);
 	}
 
+	/**
+	 * Remove torrent metadata, cancel active jobs, and stop seeding.
+	 */
+	public boolean deleteTorrent(String infoHashHex) {
+		if (infoHashHex == null || infoHashHex.isBlank()) {
+			throw new IllegalArgumentException("infoHash is required");
+		}
+		String normalized = infoHashHex.toLowerCase();
+		boolean removed = false;
+
+		// Cancel and remove download jobs tied to this torrent
+		List<String> jobsToRemove = new ArrayList<>();
+		for (DownloadJob job : downloadJobs.values()) {
+			if (job.getInfoHashHex().equalsIgnoreCase(normalized)) {
+				if (job.getFuture() != null) {
+					job.getFuture().cancel(true);
+				}
+				job.setStatus(DownloadJob.Status.CANCELLED);
+				jobsToRemove.add(job.getJobId());
+				removed = true;
+			}
+		}
+		for (String jobId : jobsToRemove) {
+			downloadJobs.remove(jobId);
+		}
+
+		// Stop any scheduled announce handling
+		activeTorrentsForAnnounce.keySet().removeIf(hash -> hash.equalsIgnoreCase(normalized));
+
+		// Unregister from seeding
+		if (peerServer.unregisterTorrent(normalized)) {
+			removed = true;
+		}
+
+		// Delete stored torrent file
+		if (persistenceService != null) {
+			try {
+				if (persistenceService.deleteTorrentFile(normalized)) {
+					removed = true;
+				}
+			} catch (IOException e) {
+				throw new RuntimeException("Failed to delete torrent file: " + e.getMessage(), e);
+			}
+		}
+
+		return removed;
+	}
+
 	public String decode(String encoded) {
         try {
             final var decoded = new BencodeDeserializer(encoded.getBytes()).parse();
