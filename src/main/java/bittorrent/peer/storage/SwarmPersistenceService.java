@@ -22,7 +22,8 @@ public class SwarmPersistenceService {
     private final Gson gson = new Gson();
 
     public SwarmPersistenceService(int listenPort) {
-        this.storageDir = System.getProperty("user.home") + "/.bittorrent-peer-" + listenPort;
+        // Use peer_data/{port}/ directory in the project repo
+        this.storageDir = "peer_data/" + listenPort;
         this.storageFile = this.storageDir + "/known_peers.json";
     }
 
@@ -62,14 +63,19 @@ public class SwarmPersistenceService {
                 Files.createDirectories(path.getParent());
             }
             
-            // Convert to serializable format
+            // Convert to serializable format - only save IPv4 addresses
             Map<String, SwarmStateData> data = new HashMap<>();
             for (Map.Entry<String, Set<InetSocketAddress>> entry : swarms.entrySet()) {
                 SwarmStateData stateData = new SwarmStateData();
                 for (InetSocketAddress addr : entry.getValue()) {
-                    stateData.knownPeers.add(new SwarmData(addr.getHostString(), addr.getPort()));
+                    // Only save IPv4 addresses
+                    if (addr.getAddress() != null && addr.getAddress().getAddress().length == 4) {
+                        stateData.knownPeers.add(new SwarmData(addr.getHostString(), addr.getPort()));
+                    }
                 }
-                data.put(entry.getKey(), stateData);
+                if (!stateData.knownPeers.isEmpty()) {
+                    data.put(entry.getKey(), stateData);
+                }
             }
             
             try (Writer writer = new FileWriter(storageFile)) {
@@ -102,19 +108,27 @@ public class SwarmPersistenceService {
                 return new ConcurrentHashMap<>();
             }
             
-            // Convert back to InetSocketAddress sets
+            // Convert back to InetSocketAddress sets - only load IPv4 addresses
             Map<String, Set<InetSocketAddress>> swarms = new ConcurrentHashMap<>();
             for (Map.Entry<String, SwarmStateData> entry : data.entrySet()) {
                 Set<InetSocketAddress> peers = ConcurrentHashMap.newKeySet();
                 for (SwarmData peerData : entry.getValue().knownPeers) {
                     try {
-                        peers.add(peerData.toAddress());
+                        InetSocketAddress addr = peerData.toAddress();
+                        // Only load IPv4 addresses
+                        if (addr.getAddress() != null && addr.getAddress().getAddress().length == 4) {
+                            peers.add(addr);
+                        } else {
+                            System.err.println("Skipping IPv6 peer address: " + peerData.host + ":" + peerData.port);
+                        }
                     } catch (Exception e) {
                         // Skip invalid addresses
                         System.err.println("Skipping invalid peer address: " + peerData.host + ":" + peerData.port);
                     }
                 }
-                swarms.put(entry.getKey(), peers);
+                if (!peers.isEmpty()) {
+                    swarms.put(entry.getKey(), peers);
+                }
             }
             
             if (BitTorrentApplication.DEBUG) {

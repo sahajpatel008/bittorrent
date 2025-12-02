@@ -34,7 +34,8 @@ public class TorrentPersistenceService {
     @Autowired
     public TorrentPersistenceService(BitTorrentConfig config) {
         int listenPort = config.getListenPort();
-        this.storageDir = System.getProperty("user.home") + "/.bittorrent-peer-" + listenPort;
+        // Use peer_data/{port}/ directory in the project repo
+        this.storageDir = "peer_data/" + listenPort;
         this.torrentsDir = this.storageDir + "/torrents";
         this.downloadJobsFile = this.storageDir + "/download_jobs.json";
         this.seedingTorrentsFile = this.storageDir + "/seeding_torrents.json";

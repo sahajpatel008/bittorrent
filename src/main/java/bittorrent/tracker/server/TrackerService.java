@@ -64,7 +64,17 @@ public class TrackerService {
         }
         
         synchronized (peers) {
-             return new ArrayList<>(peers);
+            // Filter to only return IPv4 addresses
+            return peers.stream()
+                .filter(peer -> {
+                    try {
+                        java.net.InetAddress addr = java.net.InetAddress.getByName(peer.ip());
+                        return addr.getAddress().length == 4; // IPv4 addresses are 4 bytes
+                    } catch (Exception e) {
+                        return false;
+                    }
+                })
+                .collect(Collectors.toList());
         }
     }
 

@@ -214,6 +214,13 @@ public class BitTorrentService {
 	 * to keep them from timing out (tracker removes peers after 30 minutes)
 	 */
 	private void reannounceActiveTorrents() {
+		// First, validate and cleanup seeding torrents with missing files
+		List<String> removedTorrents = peerServer.validateAndCleanupSeedingTorrents();
+		for (String infoHashHex : removedTorrents) {
+			activeTorrentsForAnnounce.remove(infoHashHex);
+			System.err.println("Removed torrent from active announce list due to missing file: " + infoHashHex);
+		}
+		
 		for (Map.Entry<String, Torrent> entry : activeTorrentsForAnnounce.entrySet()) {
 			String infoHashHex = entry.getKey();
 			Torrent torrent = entry.getValue();
@@ -222,6 +229,12 @@ public class BitTorrentService {
 			// If not, remove from tracking
 			if (!peerServer.isTorrentActive(infoHashHex)) {
 				activeTorrentsForAnnounce.remove(infoHashHex);
+				continue;
+			}
+			
+			// Check if seeding file still exists
+			if (!peerServer.isSeedingFileExists(infoHashHex)) {
+				System.err.println("Seeding file missing for torrent " + infoHashHex + ", skipping announce");
 				continue;
 			}
 			
@@ -406,11 +419,74 @@ public class BitTorrentService {
 	 * Force announce to tracker for a torrent
 	 */
 	public void forceAnnounce(String infoHashHex) throws IOException {
+		// Normalize infoHash (case-insensitive)
+		String normalized = infoHashHex.toLowerCase();
+		
+		// First, try to get from activeTorrentsForAnnounce (try both original and normalized)
 		Torrent torrent = activeTorrentsForAnnounce.get(infoHashHex);
 		if (torrent == null) {
-			throw new IllegalArgumentException("Torrent not found: " + infoHashHex);
+			torrent = activeTorrentsForAnnounce.get(normalized);
 		}
-		trackerClient.announce(torrent, config.getListenPort(), 0L, Event.NONE);
+		// Also try case-insensitive lookup
+		if (torrent == null) {
+			for (Map.Entry<String, Torrent> entry : activeTorrentsForAnnounce.entrySet()) {
+				if (entry.getKey().equalsIgnoreCase(infoHashHex)) {
+					torrent = entry.getValue();
+					break;
+				}
+			}
+		}
+		
+		// If not found, check if it's a seeding torrent
+		if (torrent == null && peerServer.isTorrentActive(normalized)) {
+			String torrentPath = persistenceService.getTorrentFilePath(normalized);
+			if (torrentPath != null) {
+				torrent = load(torrentPath);
+				// Add to activeTorrentsForAnnounce for future use
+				activeTorrentsForAnnounce.put(normalized, torrent);
+			}
+		}
+		
+		// If still not found, check if it's an active download job
+		if (torrent == null) {
+			for (DownloadJob job : downloadJobs.values()) {
+				if (job.getInfoHashHex().toLowerCase().equals(normalized)) {
+					String torrentPath = persistenceService.getTorrentFilePath(normalized);
+					if (torrentPath != null) {
+						torrent = load(torrentPath);
+						// Add to activeTorrentsForAnnounce for future use
+						activeTorrentsForAnnounce.put(normalized, torrent);
+					}
+					break;
+				}
+			}
+		}
+		
+		if (torrent == null) {
+			throw new IllegalArgumentException("Torrent not found: " + infoHashHex + 
+				" (not in active downloads or seeding torrents)");
+		}
+		
+		// Determine if we're seeding (left=0) or downloading (left>0)
+		long left = 0L;
+		if (peerServer.isTorrentActive(normalized)) {
+			// Seeding torrent
+			left = 0L;
+		} else {
+			// Check if it's a download job
+			for (DownloadJob job : downloadJobs.values()) {
+				if (job.getInfoHashHex().toLowerCase().equals(normalized)) {
+					// Calculate remaining bytes
+					TorrentInfo info = torrent.info();
+					long totalBytes = info.length();
+					long downloadedBytes = (long) (totalBytes * (job.getProgress() / 100.0));
+					left = Math.max(0, totalBytes - downloadedBytes);
+					break;
+				}
+			}
+		}
+		
+		trackerClient.announce(torrent, config.getListenPort(), left, Event.NONE);
 	}
 	
 	/**

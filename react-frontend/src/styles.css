@@ -307,6 +307,22 @@ th {
   color: #fde047;
 }
 
+.pill.seeding_missing_file {
+  background: rgba(248, 113, 113, 0.25);
+  color: var(--danger);
+}
+
+.file-missing-warning {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  background: rgba(248, 113, 113, 0.2);
+  color: var(--danger);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: help;
+}
+
 .feedback {
   color: var(--muted);
 }
@@ -591,4 +607,45 @@ input:disabled {
 .progress small {
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+.file-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.folder-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.folder-icon:hover {
+  transform: scale(1.1);
+  opacity: 0.8;
+}
+
+.folder-icon:active {
+  transform: scale(0.95);
+}
+
+.folder-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.download-path {
+  display: block;
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-top: 4px;
+  word-break: break-all;
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

@@ -46,12 +46,17 @@ public class BitTorrentController {
 	private final BitTorrentService bitTorrentService;
 	private final PeerServer peerServer;
 	private final TorrentProgressService progressService;
+	private final bittorrent.service.storage.TorrentPersistenceService persistenceService;
+	private final bittorrent.config.BitTorrentConfig config;
 
 	@Autowired
-	public BitTorrentController(BitTorrentService bitTorrentService, PeerServer peerServer, TorrentProgressService progressService) {
+	public BitTorrentController(BitTorrentService bitTorrentService, PeerServer peerServer, TorrentProgressService progressService,
+			bittorrent.service.storage.TorrentPersistenceService persistenceService, bittorrent.config.BitTorrentConfig config) {
 		this.bitTorrentService = bitTorrentService;
 		this.peerServer = peerServer;
 		this.progressService = progressService;
+		this.persistenceService = persistenceService;
+		this.config = config;
 	}
 
 	@GetMapping("/")
@@ -241,20 +246,22 @@ public class BitTorrentController {
 			torrentFile.transferTo(tempTorrentFile);
 			dataFile.transferTo(tempDataFile);
 			
-			// Move data file to permanent location
+			// Move data file to permanent location in peer_data/{port}/seeding/{infoHash}/ directory
 			final var torrent = bitTorrentService.loadTorrent(tempTorrentFile.getAbsolutePath());
 			final var torrentInfo = torrent.info();
+			final String infoHash = Main.HEX_FORMAT.formatHex(torrent.info().hash());
 			final String fileName = torrentInfo.name() != null ? torrentInfo.name() : "seed-" + System.currentTimeMillis();
-			final var permanentDataFile = new java.io.File(System.getProperty("user.home") + "/bittorrent-downloads", fileName);
-			permanentDataFile.getParentFile().mkdirs();
+			// Use peer_data/{port}/seeding/{infoHash}/ directory to organize by torrent
+			final var seedingBaseDir = new java.io.File("peer_data/" + config.getListenPort() + "/seeding");
+			final var torrentDir = new java.io.File(seedingBaseDir, infoHash);
+			torrentDir.mkdirs();
+			final var permanentDataFile = new java.io.File(torrentDir, fileName);
 			
 			// Copy temp file to permanent location
 			java.nio.file.Files.copy(tempDataFile.toPath(), permanentDataFile.toPath(), 
 				java.nio.file.StandardCopyOption.REPLACE_EXISTING);
 			
 			bitTorrentService.seed(tempTorrentFile.getAbsolutePath(), permanentDataFile.getAbsolutePath());
-			
-			final var infoHash = Main.HEX_FORMAT.formatHex(torrent.info().hash());
 			
 			tempTorrentFile.delete();
 			tempDataFile.delete();
@@ -292,6 +299,15 @@ public class BitTorrentController {
 			torrentInfo.put("jobId", job.getJobId());
 			torrentInfo.put("downloadSpeed", job.getOverallDownloadSpeed());
 			torrentInfo.put("type", "downloading");
+			// Add download path
+			File downloadedFile = job.getDownloadedFile();
+			if (downloadedFile != null) {
+				torrentInfo.put("downloadPath", downloadedFile.getAbsolutePath());
+			} else {
+				// If download hasn't started yet, construct expected path
+				String defaultDir = System.getProperty("user.home") + "/bittorrent-downloads";
+				torrentInfo.put("downloadPath", defaultDir + "/" + job.getFileName());
+			}
 			torrents.add(torrentInfo);
 		}
 		
@@ -310,6 +326,21 @@ public class BitTorrentController {
 				torrentInfo.put("status", "SEEDING");
 				torrentInfo.put("progress", 100.0);
 				torrentInfo.put("type", "seeding");
+				// Add download path (file location for seeding torrents)
+				if (file != null) {
+					torrentInfo.put("downloadPath", file.getAbsolutePath());
+					// Check if file exists
+					boolean fileExists = file.exists();
+					torrentInfo.put("fileExists", fileExists);
+					if (!fileExists) {
+						torrentInfo.put("status", "SEEDING_MISSING_FILE");
+						torrentInfo.put("error", "Seeding file not found: " + file.getAbsolutePath());
+					}
+				} else {
+					torrentInfo.put("fileExists", false);
+					torrentInfo.put("status", "SEEDING_MISSING_FILE");
+					torrentInfo.put("error", "Seeding file not registered");
+				}
 				torrents.add(torrentInfo);
 			}
 		}

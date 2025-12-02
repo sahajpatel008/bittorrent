@@ -39,7 +39,11 @@ public record AnnounceResponse(
 					final var ip = (String) peerMap.get("ip");
 					final var port = ((Number) peerMap.get("port")).intValue();
 					try {
-						peersList.add(new InetSocketAddress(InetAddress.getByName(ip), port));
+						InetAddress addr = InetAddress.getByName(ip);
+						// Only add IPv4 addresses
+						if (addr.getAddress().length == 4) {
+							peersList.add(new InetSocketAddress(addr, port));
+						}
 					} catch (UnknownHostException e) {
 						// Ignore invalid peers
 						System.err.println("Invalid peer address: " + ip + ":" + port);
@@ -48,13 +52,21 @@ public record AnnounceResponse(
 			}
 		}
 
-		final var peers6Value = root.get("peers6");
-		if (peers6Value instanceof String compactPeers6) {
-			peersList.addAll(NetworkUtils.parseV6SocketAddresses(compactPeers6));
-		}
+		// Ignore IPv6 peers - only use IPv4
+		// final var peers6Value = root.get("peers6");
+		// if (peers6Value instanceof String compactPeers6) {
+		//     peersList.addAll(NetworkUtils.parseV6SocketAddresses(compactPeers6));
+		// }
 
-		// peersList.removeIf((x) -> x.getPort() == selfPort);
-		// peersList.removeIf((x) -> x.getAddress() instanceof Inet4Address);
+		// Filter to only IPv4 addresses
+		peersList.removeIf(addr -> {
+			InetAddress inetAddr = addr.getAddress();
+			return inetAddr == null || inetAddr.getAddress().length != 4;
+		});
+		
+		// Remove self from peer list
+		peersList.removeIf((x) -> x.getPort() == selfPort);
+		
 		System.out.println(peersList);
 
 		return new AnnounceResponse(interval, peersList);

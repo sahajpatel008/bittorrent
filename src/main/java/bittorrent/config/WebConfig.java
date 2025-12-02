@@ -29,16 +29,29 @@ public class WebConfig implements WebMvcConfigurer {
 
 	@Override
 	public void addCorsMappings(CorsRegistry registry) {
-		// Convert wildcard patterns like "http://localhost:*" to regex patterns
-		List<String> patterns = allowedOrigins.stream()
-			.map(origin -> origin.contains("*") ? origin.replace("*", "[0-9]+") : origin)
-			.collect(Collectors.toList());
+		// Check if we need to allow all localhost ports
+		boolean allowAllLocalhostPorts = allowedOrigins.stream()
+			.anyMatch(origin -> origin.contains("localhost") && origin.contains("*"));
 		
-		registry.addMapping("/**")
-			.allowedOriginPatterns(patterns.toArray(String[]::new))
-			.allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
-			.allowedHeaders("*")
-			.maxAge(3600);
+		if (allowAllLocalhostPorts) {
+			// For development: allow all localhost origins with any port
+			// Spring Boot's allowedOriginPatterns supports wildcard patterns
+			// Pattern format: http://localhost:* matches any port
+			registry.addMapping("/**")
+				.allowedOriginPatterns("http://localhost:*", "http://127.0.0.1:*", "http://[::1]:*")
+				.allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+				.allowedHeaders("*")
+				.allowCredentials(false)
+				.maxAge(3600);
+		} else {
+			// Use specific origins from configuration
+			registry.addMapping("/**")
+				.allowedOriginPatterns(allowedOrigins.toArray(String[]::new))
+				.allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+				.allowedHeaders("*")
+				.allowCredentials(false)
+				.maxAge(3600);
+		}
 	}
 
 }

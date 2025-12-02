@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -56,9 +57,11 @@ public class PeerServer {
         }
         
         try {
-            serverSocket = new ServerSocket(config.getListenPort());
+            // Bind to IPv4 only (0.0.0.0) to avoid IPv6 issues
+            serverSocket = new ServerSocket(config.getListenPort(), 50, 
+                java.net.InetAddress.getByAddress(new byte[]{0, 0, 0, 0}));
             running = true;
-            System.out.println("PeerServer listening on port " + config.getListenPort());
+            System.out.println("PeerServer listening on port " + config.getListenPort() + " (IPv4 only)");
             
             Thread acceptThread = new Thread(this::acceptLoop);
             acceptThread.setName("PeerServer-Accept");
@@ -185,6 +188,38 @@ public class PeerServer {
      */
     public File getTorrentFile(String infoHashHex) {
         return torrentFiles.get(infoHashHex);
+    }
+    
+    /**
+     * Check if the seeding file exists for a torrent
+     */
+    public boolean isSeedingFileExists(String infoHashHex) {
+        File file = torrentFiles.get(infoHashHex);
+        return file != null && file.exists();
+    }
+    
+    /**
+     * Validate all seeding torrents and remove those with missing files
+     * @return List of info hashes that were removed due to missing files
+     */
+    public List<String> validateAndCleanupSeedingTorrents() {
+        List<String> removed = new ArrayList<>();
+        for (Map.Entry<String, File> entry : torrentFiles.entrySet()) {
+            String infoHashHex = entry.getKey();
+            File file = entry.getValue();
+            if (file == null || !file.exists()) {
+                // Remove torrent with missing file
+                activeTorrents.remove(infoHashHex);
+                torrentFiles.remove(infoHashHex);
+                removed.add(infoHashHex);
+                System.out.println("Removed seeding torrent " + infoHashHex + " due to missing file: " + 
+                    (file != null ? file.getAbsolutePath() : "null"));
+            }
+        }
+        if (!removed.isEmpty()) {
+            saveSeedingTorrents();
+        }
+        return removed;
     }
 
     /**

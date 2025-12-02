@@ -132,6 +132,10 @@ public class SwarmManager {
         SwarmState state = getOrCreate(infoHashHex);
         int added = 0;
         for (InetSocketAddress addr : peers) {
+            // Only accept IPv4 addresses
+            if (addr.getAddress() == null || addr.getAddress().getAddress().length != 4) {
+                continue;
+            }
             if (addr.getPort() == selfPort) {
                 continue; // avoid ourselves
             }
@@ -154,6 +158,10 @@ public class SwarmManager {
         SwarmState state = getOrCreate(infoHashHex);
         int added = 0;
         for (InetSocketAddress addr : peers) {
+            // Only accept IPv4 addresses
+            if (addr.getAddress() == null || addr.getAddress().getAddress().length != 4) {
+                continue;
+            }
             if (state.knownPeers.add(addr)) {
                 added++;
                 // Remove from dropped if it was there

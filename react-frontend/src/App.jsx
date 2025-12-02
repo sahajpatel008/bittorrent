@@ -192,6 +192,7 @@ function App() {
             onDelete={handleDeleteTorrent}
             onForceAnnounce={handleForceAnnounce}
             onAddPeer={handleAddPeer}
+            pushAlert={pushAlert}
           />
         );
       case "peers":

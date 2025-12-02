@@ -67,17 +67,37 @@ public class TrackerController {
             infoHashHex = Main.HEX_FORMAT.formatHex(infoHashBytes);
         }
 
-        // 2. Get Peer IP
+        // 2. Get Peer IP - convert IPv6 localhost to IPv4
         String ip = request.getRemoteAddr();
+        // Convert IPv6 localhost (::1) to IPv4 localhost (127.0.0.1)
+        if ("::1".equals(ip) || "0:0:0:0:0:0:0:1".equals(ip)) {
+            ip = "127.0.0.1";
+        }
+        // Filter out any other IPv6 addresses - only accept IPv4
+        try {
+            InetAddress addr = InetAddress.getByName(ip);
+            if (addr.getAddress().length != 4) {
+                // Not IPv4, skip this peer
+                System.err.println("Rejecting IPv6 peer address: " + ip);
+                ip = null;
+            }
+        } catch (Exception e) {
+            System.err.println("Invalid peer IP address: " + ip);
+            ip = null;
+        }
 
 		// Simple debug log so we can see completion in tracker logs
-		System.out.printf("Tracker announce: infoHash=%s ip=%s:%d left=%d downloaded=%d uploaded=%d%n",
-				infoHashHex, ip, port, left, downloaded, uploaded);
+		if (ip != null) {
+		    System.out.printf("Tracker announce: infoHash=%s ip=%s:%d left=%d downloaded=%d uploaded=%d%n",
+			    infoHashHex, ip, port, left, downloaded, uploaded);
+		}
 
-        // 3. Register Peer
-        trackerService.announce(infoHashHex, ip, port, peerId);
+        // 3. Register Peer (only if valid IPv4)
+        if (ip != null) {
+            trackerService.announce(infoHashHex, ip, port, peerId);
+        }
 
-        // 4. Get Peers
+        // 4. Get Peers (filtered to IPv4 only)
         List<PeerAddress> peers = trackerService.getPeers(infoHashHex);
 
         // 5. Build Response
@@ -116,13 +136,23 @@ public class TrackerController {
     }
 
     private List<Map<String, Object>> serializeDictionaryPeers(List<PeerAddress> peers) {
-        return peers.stream().map(peer -> {
-            Map<String, Object> map = new HashMap<>();
-            map.put("peer id", peer.peerId());
-            map.put("ip", peer.ip());
-            map.put("port", peer.port());
-            return map;
-        }).toList();
+        return peers.stream()
+            .filter(peer -> {
+                // Only include IPv4 addresses
+                try {
+                    InetAddress addr = InetAddress.getByName(peer.ip());
+                    return addr.getAddress().length == 4;
+                } catch (Exception e) {
+                    return false;
+                }
+            })
+            .map(peer -> {
+                Map<String, Object> map = new HashMap<>();
+                map.put("peer id", peer.peerId());
+                map.put("ip", peer.ip());
+                map.put("port", peer.port());
+                return map;
+            }).toList();
     }
 
     /**
