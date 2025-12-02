@@ -1,0 +1,9 @@
+
+> bittorrent-control-center@0.1.0 dev
+> vite --port 5173
+
+
+  VITE v5.4.21  ready in 110 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose

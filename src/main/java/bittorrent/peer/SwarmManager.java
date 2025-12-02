@@ -24,14 +24,29 @@ import bittorrent.peer.storage.SwarmPersistenceService;
  */
 public class SwarmManager {
 
-    private static final SwarmManager INSTANCE = new SwarmManager();
+    private static SwarmManager INSTANCE;
+    private static int listenPort = 6881; // Default port
     private static final long SAVE_INTERVAL_SECONDS = 60; // Save every minute
 
+    /**
+     * Initialize SwarmManager with the listen port for port-specific storage
+     */
+    public static void initialize(int listenPort) {
+        if (INSTANCE == null) {
+            SwarmManager.listenPort = listenPort;
+            INSTANCE = new SwarmManager();
+        }
+    }
+
     public static SwarmManager getInstance() {
+        if (INSTANCE == null) {
+            // Fallback to default port if not initialized
+            initialize(6881);
+        }
         return INSTANCE;
     }
     
-    private final SwarmPersistenceService persistenceService = new SwarmPersistenceService();
+    private final SwarmPersistenceService persistenceService;
     private final ScheduledExecutorService saveScheduler = Executors.newScheduledThreadPool(1);
 
     private static class SwarmState {
@@ -46,6 +61,7 @@ public class SwarmManager {
     private final Map<String, SwarmState> swarms = new ConcurrentHashMap<>();
     
     private SwarmManager() {
+        this.persistenceService = new SwarmPersistenceService(listenPort);
         // Load persisted peers on startup
         loadPersistedPeers();
         

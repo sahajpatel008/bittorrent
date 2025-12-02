@@ -1,10 +1,12 @@
 package bittorrent.service.storage;
 
 import bittorrent.BitTorrentApplication;
+import bittorrent.config.BitTorrentConfig;
 import bittorrent.service.DownloadJob;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.*;
@@ -22,21 +24,28 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class TorrentPersistenceService {
 
-    private static final String STORAGE_DIR = System.getProperty("user.home") + "/.bittorrent";
-    private static final String TORRENTS_DIR = STORAGE_DIR + "/torrents";
-    private static final String DOWNLOAD_JOBS_FILE = STORAGE_DIR + "/download_jobs.json";
-    private static final String SEEDING_TORRENTS_FILE = STORAGE_DIR + "/seeding_torrents.json";
+    private final String storageDir;
+    private final String torrentsDir;
+    private final String downloadJobsFile;
+    private final String seedingTorrentsFile;
     
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
 
-    public TorrentPersistenceService() {
+    @Autowired
+    public TorrentPersistenceService(BitTorrentConfig config) {
+        int listenPort = config.getListenPort();
+        this.storageDir = System.getProperty("user.home") + "/.bittorrent-peer-" + listenPort;
+        this.torrentsDir = this.storageDir + "/torrents";
+        this.downloadJobsFile = this.storageDir + "/download_jobs.json";
+        this.seedingTorrentsFile = this.storageDir + "/seeding_torrents.json";
+        
         // Create directories if they don't exist
         try {
-            Path dirPath = Path.of(STORAGE_DIR);
+            Path dirPath = Path.of(this.storageDir);
             if (!Files.exists(dirPath)) {
                 Files.createDirectories(dirPath);
             }
-            Path torrentsPath = Path.of(TORRENTS_DIR);
+            Path torrentsPath = Path.of(this.torrentsDir);
             if (!Files.exists(torrentsPath)) {
                 Files.createDirectories(torrentsPath);
             }
@@ -52,7 +61,7 @@ public class TorrentPersistenceService {
      * @return Path to saved torrent file
      */
     public String saveTorrentFile(String infoHashHex, File torrentFile) throws IOException {
-        Path torrentsPath = Path.of(TORRENTS_DIR);
+        Path torrentsPath = Path.of(torrentsDir);
         Path targetPath = torrentsPath.resolve(infoHashHex + ".torrent");
         
         Files.copy(torrentFile.toPath(), targetPath, StandardCopyOption.REPLACE_EXISTING);
@@ -65,7 +74,7 @@ public class TorrentPersistenceService {
      * @return Path to torrent file, or null if not found
      */
     public String getTorrentFilePath(String infoHashHex) {
-        Path torrentPath = Path.of(TORRENTS_DIR, infoHashHex + ".torrent");
+        Path torrentPath = Path.of(torrentsDir, infoHashHex + ".torrent");
         if (Files.exists(torrentPath)) {
             return torrentPath.toString();
         }
@@ -76,7 +85,7 @@ public class TorrentPersistenceService {
      * Check if a torrent file exists
      */
     public boolean hasTorrentFile(String infoHashHex) {
-        Path torrentPath = Path.of(TORRENTS_DIR, infoHashHex + ".torrent");
+        Path torrentPath = Path.of(torrentsDir, infoHashHex + ".torrent");
         return Files.exists(torrentPath);
     }
 
@@ -85,7 +94,7 @@ public class TorrentPersistenceService {
      * @return true if a file was removed
      */
     public boolean deleteTorrentFile(String infoHashHex) throws IOException {
-        Path torrentPath = Path.of(TORRENTS_DIR, infoHashHex + ".torrent");
+        Path torrentPath = Path.of(torrentsDir, infoHashHex + ".torrent");
         return Files.deleteIfExists(torrentPath);
     }
 
@@ -113,7 +122,7 @@ public class TorrentPersistenceService {
                 }
             }
             
-            try (Writer writer = new FileWriter(DOWNLOAD_JOBS_FILE)) {
+            try (Writer writer = new FileWriter(downloadJobsFile)) {
                 gson.toJson(states, writer);
             }
         } catch (IOException e) {
@@ -128,7 +137,7 @@ public class TorrentPersistenceService {
      * Load download jobs state
      */
     public List<DownloadJobState> loadDownloadJobs() {
-        File file = new File(DOWNLOAD_JOBS_FILE);
+        File file = new File(downloadJobsFile);
         if (!file.exists()) {
             return new ArrayList<>();
         }
@@ -152,7 +161,7 @@ public class TorrentPersistenceService {
     public void saveSeedingTorrents(Map<String, SeedingTorrentState> seedingTorrents) {
         try {
             List<SeedingTorrentState> states = new ArrayList<>(seedingTorrents.values());
-            try (Writer writer = new FileWriter(SEEDING_TORRENTS_FILE)) {
+            try (Writer writer = new FileWriter(seedingTorrentsFile)) {
                 gson.toJson(states, writer);
             }
         } catch (IOException e) {
@@ -168,7 +177,7 @@ public class TorrentPersistenceService {
      */
     public void saveSeedingTorrents(List<SeedingTorrentState> states) {
         try {
-            try (Writer writer = new FileWriter(SEEDING_TORRENTS_FILE)) {
+            try (Writer writer = new FileWriter(seedingTorrentsFile)) {
                 gson.toJson(states, writer);
             }
         } catch (IOException e) {
@@ -183,7 +192,7 @@ public class TorrentPersistenceService {
      * Load seeding torrents state
      */
     public List<SeedingTorrentState> loadSeedingTorrents() {
-        File file = new File(SEEDING_TORRENTS_FILE);
+        File file = new File(seedingTorrentsFile);
         if (!file.exists()) {
             return new ArrayList<>();
         }

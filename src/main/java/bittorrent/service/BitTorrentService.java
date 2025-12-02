@@ -92,6 +92,9 @@ public class BitTorrentService {
 
 	@PostConstruct
 	public void init() {
+		// Initialize SwarmManager with listen port for port-specific storage
+		SwarmManager.initialize(config.getListenPort());
+		
 		peerServer.start();
 		// Start periodic re-announcement task
 		announceTask = announceScheduler.scheduleAtFixedRate(

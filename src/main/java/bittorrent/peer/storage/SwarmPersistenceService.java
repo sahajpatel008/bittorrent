@@ -17,9 +17,14 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class SwarmPersistenceService {
 
-    private static final String STORAGE_DIR = System.getProperty("user.home") + "/.bittorrent";
-    private static final String STORAGE_FILE = STORAGE_DIR + "/known_peers.json";
+    private final String storageDir;
+    private final String storageFile;
     private final Gson gson = new Gson();
+
+    public SwarmPersistenceService(int listenPort) {
+        this.storageDir = System.getProperty("user.home") + "/.bittorrent-peer-" + listenPort;
+        this.storageFile = this.storageDir + "/known_peers.json";
+    }
 
     /**
      * Data structure for serialization
@@ -52,7 +57,7 @@ public class SwarmPersistenceService {
      */
     public void save(Map<String, Set<InetSocketAddress>> swarms) {
         try {
-            Path path = Path.of(STORAGE_FILE);
+            Path path = Path.of(storageFile);
             if (path.getParent() != null) {
                 Files.createDirectories(path.getParent());
             }
@@ -67,12 +72,12 @@ public class SwarmPersistenceService {
                 data.put(entry.getKey(), stateData);
             }
             
-            try (Writer writer = new FileWriter(STORAGE_FILE)) {
+            try (Writer writer = new FileWriter(storageFile)) {
                 gson.toJson(data, writer);
             }
             
             if (BitTorrentApplication.DEBUG) {
-                System.out.println("Saved " + swarms.size() + " swarms to " + STORAGE_FILE);
+                System.out.println("Saved " + swarms.size() + " swarms to " + storageFile);
             }
         } catch (IOException e) {
             System.err.println("Failed to save swarm data: " + e.getMessage());
@@ -84,7 +89,7 @@ public class SwarmPersistenceService {
      * @return Map<infoHashHex, Set<InetSocketAddress>>
      */
     public Map<String, Set<InetSocketAddress>> load() {
-        File file = new File(STORAGE_FILE);
+        File file = new File(storageFile);
         if (!file.exists()) {
             return new ConcurrentHashMap<>();
         }
@@ -113,7 +118,7 @@ public class SwarmPersistenceService {
             }
             
             if (BitTorrentApplication.DEBUG) {
-                System.out.println("Loaded " + swarms.size() + " swarms from " + STORAGE_FILE);
+                System.out.println("Loaded " + swarms.size() + " swarms from " + storageFile);
             }
             
             return swarms;
