@@ -8,8 +8,9 @@ import SeedingStation from "./components/SeedingStation.jsx";
 import AlertStack from "./components/AlertStack.jsx";
 import TorrentCreator from "./components/TorrentCreator.jsx";
 import AddPeerModal from "./components/AddPeerModal.jsx";
-import { request } from "./api.js";
+import { API_BASE, request } from "./api.js";
 import useInterval from "./hooks/useInterval.js";
+import useEventSource from "./hooks/useEventSource.js";
 
 function App() {
   const [torrents, setTorrents] = useState([]);
@@ -20,6 +21,7 @@ function App() {
   const [jobSnapshots, setJobSnapshots] = useState({});
   const [alerts, setAlerts] = useState([]);
   const [addPeerModalInfoHash, setAddPeerModalInfoHash] = useState(null);
+  const [activeView, setActiveView] = useState("analyzer");
 
   const pushAlert = useCallback((message, variant = "info") => {
     setAlerts((current) => [...current, { id: crypto.randomUUID(), message, variant }]);
@@ -56,6 +58,37 @@ function App() {
       refreshTorrents();
     }
   }, [refreshTorrents]);
+
+  // Centralized SSE subscription for the selected job - stays active regardless of view
+  useEventSource(`${API_BASE}/torrents/download/${selectedJobId}/progress`, {
+    enabled: Boolean(selectedJobId),
+    onMessage: (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        handleJobUpdate(payload);
+      } catch (err) {
+        pushAlert?.("Failed to parse progress event", "error");
+      }
+    }
+  });
+
+  // Fetch initial job status when a job is selected
+  useEffect(() => {
+    if (!selectedJobId) return;
+    let mounted = true;
+    request(`/torrents/download/${selectedJobId}/status`)
+      .then((data) => {
+        if (!mounted) return;
+        handleJobUpdate(data);
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        pushAlert(`Failed to load job status: ${err.message}`, "error");
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [selectedJobId, handleJobUpdate, pushAlert]);
 
   const selectedSnapshot = useMemo(() => (selectedJobId ? jobSnapshots[selectedJobId] : null), [jobSnapshots, selectedJobId]);
 
@@ -131,6 +164,45 @@ function App() {
     [pushAlert, refreshTorrents]
   );
 
+  const renderActiveView = () => {
+    switch (activeView) {
+      case "analyzer":
+        return <TorrentAnalyzer onInfoReady={(info) => pushAlert(`Info hash ${info.infoHash}`, "success")} pushAlert={pushAlert} />;
+      case "download":
+        return (
+          <DownloadManager
+            onJobCreated={(jobId) => handleJobSelect(jobId)}
+            pushAlert={pushAlert}
+            activeJobId={selectedJobId}
+            jobSnapshot={selectedSnapshot}
+          />
+        );
+      case "create":
+        return <TorrentCreator pushAlert={pushAlert} />;
+      case "transfers":
+        return (
+          <ActiveTransfers
+            torrents={torrents}
+            loading={loadingTorrents}
+            lastUpdated={lastUpdated}
+            autoRefresh={autoRefresh}
+            onToggleAuto={setAutoRefresh}
+            onRefresh={refreshTorrents}
+            onInspect={handleJobSelect}
+            onDelete={handleDeleteTorrent}
+            onForceAnnounce={handleForceAnnounce}
+            onAddPeer={handleAddPeer}
+          />
+        );
+      case "peers":
+        return <PeerTools pushAlert={pushAlert} />;
+      case "seeding":
+        return <SeedingStation pushAlert={pushAlert} onSeeding={() => refreshTorrents()} />;
+      default:
+        return <TorrentAnalyzer onInfoReady={(info) => pushAlert(`Info hash ${info.infoHash}`, "success")} pushAlert={pushAlert} />;
+    }
+  };
+
   return (
     <div className="app-shell">
       <header className="hero">
@@ -146,32 +218,36 @@ function App() {
         </div>
       </header>
 
-      <main className="grid">
-        <TorrentAnalyzer onInfoReady={(info) => pushAlert(`Info hash ${info.infoHash}`, "success")} pushAlert={pushAlert} />
-        <DownloadManager onJobCreated={(jobId) => handleJobSelect(jobId)} pushAlert={pushAlert} />
-        <TorrentCreator pushAlert={pushAlert} />
-        <ActiveTransfers
-          torrents={torrents}
-          loading={loadingTorrents}
-          lastUpdated={lastUpdated}
-          autoRefresh={autoRefresh}
-          onToggleAuto={setAutoRefresh}
-          onRefresh={refreshTorrents}
-          onInspect={handleJobSelect}
-          onDelete={handleDeleteTorrent}
-          onForceAnnounce={handleForceAnnounce}
-          onAddPeer={handleAddPeer}
-        />
-        <PeerTools pushAlert={pushAlert} />
-        <SeedingStation pushAlert={pushAlert} onSeeding={() => refreshTorrents()} />
+      <nav className="navbar">
+        <button className={activeView === "analyzer" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("analyzer")}>
+          Torrent Analyzer
+        </button>
+        <button className={activeView === "download" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("download")}>
+          Download Manager
+        </button>
+        <button className={activeView === "create" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("create")}>
+          Torrent Creator
+        </button>
+        <button className={activeView === "transfers" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("transfers")}>
+          Active Transfers
+        </button>
+        <button className={activeView === "peers" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("peers")}>
+          Peer Tools
+        </button>
+        <button className={activeView === "seeding" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("seeding")}>
+          Seeding Station
+        </button>
+      </nav>
+
+      <main className="view-container">
+        {renderActiveView()}
       </main>
 
       <JobDetailDrawer
-        jobId={selectedJobId}
+        jobId={activeView !== "download" ? selectedJobId : null}
         snapshot={selectedSnapshot}
         onClose={() => setSelectedJobId(null)}
-        onJobUpdate={handleJobUpdate}
-        pushAlert={pushAlert}
+        onViewFullDetails={() => setActiveView("download")}
       />
       <AlertStack alerts={alerts} onDismiss={dismissAlert} />
       {addPeerModalInfoHash && (

@@ -62,9 +62,43 @@ body {
   align-items: flex-start;
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+.navbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 32px;
+  padding: 8px;
+  background: var(--panel);
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  flex-wrap: wrap;
+}
+
+.nav-item {
+  padding: 12px 20px;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.nav-item:hover {
+  background: var(--panel-light);
+  color: var(--text);
+}
+
+.nav-item.active {
+  background: var(--accent);
+  color: #022c22;
+}
+
+.view-container {
+  display: flex;
+  flex-direction: column;
   gap: 24px;
 }
 
@@ -176,6 +210,37 @@ button {
 
 .metrics-grid.small {
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.metadata-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.metadata-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  background: var(--panel-light);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.metadata-row dt {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.metadata-row dd {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 500;
+  word-break: break-all;
 }
 
 .mono {
@@ -416,4 +481,114 @@ input:disabled {
     left: 16px;
     right: 16px;
   }
+}
+
+/* Job Telemetry Styles */
+.job-telemetry {
+  background: var(--panel-light);
+  border-radius: 16px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.telemetry-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.telemetry-header h4 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.telemetry-header .small {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.telemetry-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 16px;
+  margin: 0;
+}
+
+.telemetry-stats dt {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.telemetry-stats dd {
+  margin: 4px 0 0;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.telemetry-section {
+  margin-top: 8px;
+}
+
+.telemetry-section h5 {
+  margin: 0 0 12px;
+  font-size: 0.9rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.piece-sources {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.piece-sources dt {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.piece-sources dd {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.inline-telemetry {
+  margin-top: 8px;
+}
+
+.inline-telemetry h3 {
+  margin: 16px 0 12px;
+  font-size: 1rem;
+  color: var(--accent);
+}
+
+.download-manager-panel {
+  max-width: 100%;
+}
+
+.full-width {
+  width: 100%;
+}
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.progress small {
+  color: var(--muted);
+  font-size: 0.85rem;
 }

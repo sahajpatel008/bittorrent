@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { postForm } from "../api.js";
+import JobTelemetry from "./JobTelemetry.jsx";
 
-function DownloadManager({ onJobCreated, pushAlert }) {
+function DownloadManager({ onJobCreated, pushAlert, activeJobId, jobSnapshot }) {
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [currentJobId, setCurrentJobId] = useState(null);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -19,6 +21,7 @@ function DownloadManager({ onJobCreated, pushAlert }) {
     try {
       const result = await postForm("/torrents/download", formData);
       setStatus(`Job ${result.jobId} started`);
+      setCurrentJobId(result.jobId);
       onJobCreated?.(result.jobId);
       pushAlert?.("Download job started.", "success");
     } catch (err) {
@@ -30,8 +33,11 @@ function DownloadManager({ onJobCreated, pushAlert }) {
     }
   };
 
+  // Use the passed activeJobId or the locally created one
+  const displayJobId = activeJobId || currentJobId;
+
   return (
-    <section className="panel">
+    <section className="panel download-manager-panel">
       <header>
         <h2>Download Manager</h2>
         <p>Upload a torrent to start an asynchronous download job.</p>
@@ -49,7 +55,19 @@ function DownloadManager({ onJobCreated, pushAlert }) {
           {busy ? "Starting..." : "Start Download"}
         </button>
       </form>
-      {status && <p className="feedback">{status}</p>}
+      {status && !displayJobId && <p className="feedback">{status}</p>}
+      
+      {displayJobId && (
+        <div className="inline-telemetry">
+          <hr />
+          <h3>Active Download</h3>
+          <JobTelemetry
+            jobId={displayJobId}
+            snapshot={jobSnapshot}
+            compact={false}
+          />
+        </div>
+      )}
     </section>
   );
 }

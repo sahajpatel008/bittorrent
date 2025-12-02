@@ -13,6 +13,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  * Configures global CORS so the React frontend (default: http://localhost:5173)
  * can talk to the Spring Boot API without browser errors. Customize the allowed
  * origins via the `app.cors.allowed-origins` property (comma separated list).
+ * Use "http://localhost:*" to allow any port from localhost.
  */
 @Configuration
 public class WebConfig implements WebMvcConfigurer {
@@ -28,8 +29,13 @@ public class WebConfig implements WebMvcConfigurer {
 
 	@Override
 	public void addCorsMappings(CorsRegistry registry) {
+		// Convert wildcard patterns like "http://localhost:*" to regex patterns
+		List<String> patterns = allowedOrigins.stream()
+			.map(origin -> origin.contains("*") ? origin.replace("*", "[0-9]+") : origin)
+			.collect(Collectors.toList());
+		
 		registry.addMapping("/**")
-			.allowedOrigins(allowedOrigins.toArray(String[]::new))
+			.allowedOriginPatterns(patterns.toArray(String[]::new))
 			.allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 			.allowedHeaders("*")
 			.maxAge(3600);
