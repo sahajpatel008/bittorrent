@@ -7,6 +7,7 @@ import PeerTools from "./components/PeerTools.jsx";
 import SeedingStation from "./components/SeedingStation.jsx";
 import AlertStack from "./components/AlertStack.jsx";
 import TorrentCreator from "./components/TorrentCreator.jsx";
+import AddPeerModal from "./components/AddPeerModal.jsx";
 import { request } from "./api.js";
 import useInterval from "./hooks/useInterval.js";
 
@@ -18,6 +19,7 @@ function App() {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [jobSnapshots, setJobSnapshots] = useState({});
   const [alerts, setAlerts] = useState([]);
+  const [addPeerModalInfoHash, setAddPeerModalInfoHash] = useState(null);
 
   const pushAlert = useCallback((message, variant = "info") => {
     setAlerts((current) => [...current, { id: crypto.randomUUID(), message, variant }]);
@@ -91,6 +93,44 @@ function App() {
     [pushAlert, refreshTorrents, selectedJobId]
   );
 
+  const handleForceAnnounce = useCallback(
+    async (infoHash) => {
+      if (!infoHash) return;
+      try {
+        await request(`/torrents/${infoHash}/announce`, { method: "POST" });
+        pushAlert(`Successfully announced torrent ${infoHash} to tracker`, "success");
+        // Optionally refresh to show updated peer count
+        setTimeout(() => refreshTorrents(), 1000);
+      } catch (err) {
+        pushAlert(`Failed to announce torrent: ${err.message}`, "error");
+      }
+    },
+    [pushAlert, refreshTorrents]
+  );
+
+  const handleAddPeer = useCallback((infoHash) => {
+    if (!infoHash) return;
+    setAddPeerModalInfoHash(infoHash);
+  }, []);
+
+  const handleAddPeerSubmit = useCallback(
+    async (infoHash, ip, port) => {
+      try {
+        await request(`/torrents/${infoHash}/peers`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ip, port })
+        });
+        pushAlert(`Successfully added peer ${ip}:${port} to torrent`, "success");
+        // Optionally refresh to show updated peer count
+        setTimeout(() => refreshTorrents(), 1000);
+      } catch (err) {
+        throw new Error(err.message || "Failed to add peer");
+      }
+    },
+    [pushAlert, refreshTorrents]
+  );
+
   return (
     <div className="app-shell">
       <header className="hero">
@@ -119,6 +159,8 @@ function App() {
           onRefresh={refreshTorrents}
           onInspect={handleJobSelect}
           onDelete={handleDeleteTorrent}
+          onForceAnnounce={handleForceAnnounce}
+          onAddPeer={handleAddPeer}
         />
         <PeerTools pushAlert={pushAlert} />
         <SeedingStation pushAlert={pushAlert} onSeeding={() => refreshTorrents()} />
@@ -132,6 +174,14 @@ function App() {
         pushAlert={pushAlert}
       />
       <AlertStack alerts={alerts} onDismiss={dismissAlert} />
+      {addPeerModalInfoHash && (
+        <AddPeerModal
+          infoHash={addPeerModalInfoHash}
+          onClose={() => setAddPeerModalInfoHash(null)}
+          onSubmit={handleAddPeerSubmit}
+          pushAlert={pushAlert}
+        />
+      )}
     </div>
   );
 }

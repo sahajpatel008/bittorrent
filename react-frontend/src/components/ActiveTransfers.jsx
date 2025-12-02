@@ -8,7 +8,9 @@ function ActiveTransfers({
   onToggleAuto,
   onRefresh,
   onInspect,
-  onDelete
+  onDelete,
+  onForceAnnounce,
+  onAddPeer
 }) {
   return (
     <section className="panel">
@@ -67,6 +69,26 @@ function ActiveTransfers({
                       {torrent.jobId && (
                         <button type="button" className="ghost" onClick={() => onInspect(torrent.jobId)}>
                           Inspect
+                        </button>
+                      )}
+                      {onForceAnnounce && (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => onForceAnnounce?.(torrent.infoHash)}
+                          disabled={!torrent.infoHash}
+                        >
+                          Force Announce
+                        </button>
+                      )}
+                      {onAddPeer && (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => onAddPeer?.(torrent.infoHash)}
+                          disabled={!torrent.infoHash}
+                        >
+                          Add Peer
                         </button>
                       )}
                       <button
