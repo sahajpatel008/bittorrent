@@ -15,6 +15,43 @@ The scripts automatically detect running peers and start new instances on the ne
 
 ## Scripts
 
+### `scripts/start-tracker.sh`
+
+Starts the tracker server on port 8080.
+
+```bash
+./scripts/start-tracker.sh
+# Or: scripts/start-tracker.sh
+```
+
+**What it does:**
+1. Checks if port 8080 is already in use
+2. Starts tracker server using Maven with correct main class
+3. Stores PID and tracker info in `logs/` directory
+4. Outputs log file: `logs/tracker.log`
+
+**Example output:**
+```
+Starting Tracker Server
+  Port: http://localhost:8080
+  Log:  logs/tracker.log
+```
+
+### `scripts/stop-tracker.sh`
+
+Stops the tracker server.
+
+```bash
+./scripts/stop-tracker.sh
+# Or: scripts/stop-tracker.sh
+```
+
+**What it does:**
+1. Reads PID from `logs/tracker.pid`
+2. Sends TERM signal for graceful shutdown
+3. Sends KILL signal if process is still running
+4. Cleans up PID and info files
+
 ### `scripts/start-peer.sh`
 
 Starts a new peer instance with automatic port detection.
@@ -82,13 +119,19 @@ Lists all running peer instances with their status.
 
 All logs are stored in the `logs/` directory:
 
+**Tracker logs:**
+- `logs/tracker.log` - Tracker server logs
+- `logs/tracker.pid` - Tracker process ID (for stopping)
+- `logs/tracker.info` - Tracker configuration (port, PID)
+
+**Peer logs:**
 - `logs/peer-{n}-frontend.log` - Frontend (Vite) logs
 - `logs/peer-{n}-backend.log` - Backend (Spring Boot) logs
 - `logs/peer-{n}-frontend-install.log` - Frontend dependency installation logs (if dependencies were reinstalled)
 - `logs/peer-{n}.pids` - Process IDs (for stopping)
 - `logs/peer-{n}.info` - Peer configuration (ports, PIDs)
 
-The `logs/` directory is automatically created when you run `start-peer.sh` for the first time.
+The `logs/` directory is automatically created when you run any script for the first time.
 
 ## Port Allocation
 
@@ -230,6 +273,8 @@ The script automatically handles frontend dependencies:
 
 ## Example Workflow
 
+### Basic Peer Management
+
 ```bash
 # Start first peer
 ./scripts/start-peer.sh
@@ -253,13 +298,33 @@ tail -f logs/peer-1-backend.log
 ./scripts/stop-peer.sh all
 ```
 
-## Integration with Tracker
-
-To test with a tracker server, start the tracker first (see [TESTING.md](./TESTING.md)):
+### Complete Setup with Tracker
 
 ```bash
 # Terminal 1: Start tracker
-mvn spring-boot:run -Dspring-boot.run.main-class=bittorrent.tracker.server.TrackerServerApplication -Dspring-boot.run.arguments="--server.port=8080"
+./scripts/start-tracker.sh
+
+# Terminal 2: Start peer 1 (seeder)
+./scripts/start-peer.sh
+
+# Terminal 3: Start peer 2 (leecher)
+./scripts/start-peer.sh
+
+# Check tracker logs
+tail -f logs/tracker.log
+
+# Stop everything
+./scripts/stop-peer.sh all
+./scripts/stop-tracker.sh
+```
+
+## Integration with Tracker
+
+To test with a tracker server, start the tracker first:
+
+```bash
+# Terminal 1: Start tracker
+./scripts/start-tracker.sh
 
 # Terminal 2: Start peer 1 (seeder)
 ./scripts/start-peer.sh
@@ -269,4 +334,13 @@ mvn spring-boot:run -Dspring-boot.run.main-class=bittorrent.tracker.server.Track
 ```
 
 Each peer will automatically connect to the tracker on port 8080.
+
+**Stopping everything:**
+```bash
+# Stop all peers
+./scripts/stop-peer.sh all
+
+# Stop tracker
+./scripts/stop-tracker.sh
+```
 

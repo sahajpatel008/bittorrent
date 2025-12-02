@@ -32,6 +32,20 @@ check_port() {
     fi
 }
 
+# Check tracker status
+if [ -f "logs/tracker.info" ]; then
+    source logs/tracker.info 2>/dev/null || true
+    if [ -n "$TRACKER_PID" ] && is_process_running "$TRACKER_PID" 2>/dev/null; then
+        echo -e "${BLUE}=== Tracker Server ===${NC}"
+        echo -e "${GREEN}Tracker${NC}"
+        echo -e "  Port: http://localhost:${TRACKER_PORT:-8080}"
+        echo -e "  PID:  ${TRACKER_PID}"
+        echo -e "  Log:  ${TRACKER_LOG:-logs/tracker.log}"
+        echo -e "  Status: ${GREEN}Running${NC}"
+        echo ""
+    fi
+fi
+
 echo -e "${BLUE}=== Running Peer Instances ===${NC}"
 echo ""
 
