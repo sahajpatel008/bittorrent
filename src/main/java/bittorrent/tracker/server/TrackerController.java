@@ -35,7 +35,7 @@ public class TrackerController {
 
     @GetMapping(value = "/announce", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<byte[]> announce(
-            @RequestParam("info_hash") String infoHashEncoded,
+            @RequestParam(value = "info_hash", required = false) String infoHashEncoded,
             @RequestParam("peer_id") String peerId,
             @RequestParam("port") int port,
 			@RequestParam(value = "uploaded", defaultValue = "0") long uploaded,
@@ -45,17 +45,27 @@ public class TrackerController {
             HttpServletRequest request
     ) throws IOException {
 
-        // 1. Decode Info Hash
-        // Spring might have already decoded it partially or fully, but info_hash is raw bytes.
-        // It's tricky with standard @RequestParam because info_hash can contain non-printable chars.
-        // A safer way often involves manually parsing query string if standard decoding fails, 
-        // but for now let's assume standard URL decoding works or we get the raw string.
-        // However, the standard TrackerClient sends it url-encoded. 
-        // We need to ensure we get the bytes back correctly.
-        // A robust way is to re-encode to bytes if it was treated as ISO-8859-1.
-        
-        byte[] infoHashBytes = infoHashEncoded.getBytes(StandardCharsets.ISO_8859_1);
-        String infoHashHex = Main.HEX_FORMAT.formatHex(infoHashBytes);
+        // 1. Decode Info Hash - manually extract from query string to preserve binary bytes
+        // Spring's @RequestParam uses UTF-8 decoding which corrupts bytes > 127
+        // We need to manually extract and decode using ISO-8859-1
+        String infoHashHex;
+        String queryString = request.getQueryString();
+        if (queryString != null && queryString.contains("info_hash=")) {
+            // Extract the raw info_hash parameter value
+            int start = queryString.indexOf("info_hash=") + 10;
+            int end = queryString.indexOf("&", start);
+            if (end == -1) end = queryString.length();
+            String rawInfoHash = queryString.substring(start, end);
+            
+            // URL-decode using ISO-8859-1 to preserve binary bytes
+            String decoded = URLDecoder.decode(rawInfoHash, StandardCharsets.ISO_8859_1);
+            byte[] infoHashBytes = decoded.getBytes(StandardCharsets.ISO_8859_1);
+            infoHashHex = Main.HEX_FORMAT.formatHex(infoHashBytes);
+        } else {
+            // Fallback to Spring-decoded value
+            byte[] infoHashBytes = infoHashEncoded.getBytes(StandardCharsets.ISO_8859_1);
+            infoHashHex = Main.HEX_FORMAT.formatHex(infoHashBytes);
+        }
 
         // 2. Get Peer IP
         String ip = request.getRemoteAddr();
