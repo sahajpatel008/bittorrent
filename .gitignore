@@ -7,3 +7,4 @@ target/
 logs/
 bittorrent-frontend/node_modules
 react-frontend/node_modules
+reports/
