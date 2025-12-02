@@ -1,47 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
-import { API_BASE, request } from "../api.js";
-import useEventSource from "../hooks/useEventSource.js";
+import { useMemo } from "react";
 
-function JobDetailDrawer({ jobId, snapshot, onClose, onJobUpdate, pushAlert }) {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+function JobDetailDrawer({ jobId, snapshot, onClose, onViewFullDetails }) {
   const job = useMemo(() => snapshot || null, [snapshot]);
-
-  useEffect(() => {
-    if (!jobId) return;
-    let mounted = true;
-    setLoading(true);
-    setError(null);
-    request(`/torrents/download/${jobId}/status`)
-      .then((data) => {
-        if (!mounted) return;
-        onJobUpdate?.(data);
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        setError(err.message);
-      })
-      .finally(() => mounted && setLoading(false));
-    return () => {
-      mounted = false;
-    };
-  }, [jobId, onJobUpdate]);
-
-  useEventSource(`${API_BASE}/torrents/download/${jobId}/progress`, {
-    enabled: Boolean(jobId),
-    onMessage: (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        onJobUpdate?.(payload);
-      } catch (err) {
-        pushAlert?.("Failed to parse progress event", "error");
-      }
-    }
-  });
 
   if (!jobId) {
     return null;
   }
+
+  const handleViewFullDetails = () => {
+    onViewFullDetails?.();
+    // Don't close - just navigate, the drawer will hide because activeView changes
+  };
 
   return (
     <aside className="drawer">
@@ -55,8 +24,7 @@ function JobDetailDrawer({ jobId, snapshot, onClose, onJobUpdate, pushAlert }) {
           Close
         </button>
       </div>
-      {loading && <p>Loading job details...</p>}
-      {error && <p className="feedback error">{error}</p>}
+      {!job && <p>Loading job details...</p>}
       {job && (
         <>
           <div className="progress">
@@ -65,14 +33,12 @@ function JobDetailDrawer({ jobId, snapshot, onClose, onJobUpdate, pushAlert }) {
             </div>
             <small>{Number(job.progress ?? 0).toFixed(1)}% complete</small>
           </div>
-          <dl className="metrics-grid">
+          <dl className="metrics-grid small">
             {[
               ["Status", job.status],
               ["Pieces", `${job.completedPieces ?? 0} / ${job.totalPieces ?? 0}`],
-              ["Overall speed", renderSpeed(job.overallDownloadSpeed)],
-              ["Started", formatDate(job.startTime)],
-              ["Updated", formatDate(job.lastUpdateTime)],
-              ["Job ID", job.jobId]
+              ["Speed", renderSpeed(job.overallDownloadSpeed)],
+              ["Started", formatDate(job.startTime)]
             ].map(([label, value]) => (
               <div key={label}>
                 <dt>{label}</dt>
@@ -80,56 +46,11 @@ function JobDetailDrawer({ jobId, snapshot, onClose, onJobUpdate, pushAlert }) {
               </div>
             ))}
           </dl>
-          <section>
-            <h4>Peer stats</h4>
-            {job.peers?.length ? (
-              <div className="table-wrap compact">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Peer</th>
-                      <th>Downloaded</th>
-                      <th>Sent</th>
-                      <th>Pieces</th>
-                      <th>Speed</th>
-                      <th>State</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {job.peers.map((peer) => (
-                      <tr key={peer.address}>
-                        <td className="mono">{peer.ip}:{peer.port}</td>
-                        <td>{formatBytes(peer.bytesDownloaded)}</td>
-                        <td>{formatBytes(peer.bytesUploaded)}</td>
-                        <td>
-                          {peer.piecesDownloaded}/{peer.piecesUploaded}
-                        </td>
-                        <td>{peer.downloadSpeed ? `${formatBytes(peer.downloadSpeed)}/s` : "—"}</td>
-                        <td>{peer.isChoked ? "Choked" : "Open"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <p className="feedback">Waiting for peers...</p>
-            )}
-          </section>
-          {job.pieceSource && Object.keys(job.pieceSource).length > 0 && (
-            <section>
-              <h4>Latest piece sources</h4>
-              <dl className="metrics-grid">
-                {Object.entries(job.pieceSource)
-                  .slice(-8)
-                  .map(([piece, origin]) => (
-                    <div key={piece}>
-                      <dt>Piece {piece}</dt>
-                      <dd className="mono">{origin}</dd>
-                    </div>
-                  ))}
-              </dl>
-            </section>
-          )}
+          
+          <button className="primary full-width" onClick={handleViewFullDetails}>
+            View Full Details
+          </button>
+          
           {job.errorMessage && <p className="feedback error">{job.errorMessage}</p>}
         </>
       )}

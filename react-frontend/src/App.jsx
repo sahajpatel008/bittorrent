@@ -8,8 +8,9 @@ import SeedingStation from "./components/SeedingStation.jsx";
 import AlertStack from "./components/AlertStack.jsx";
 import TorrentCreator from "./components/TorrentCreator.jsx";
 import AddPeerModal from "./components/AddPeerModal.jsx";
-import { request } from "./api.js";
+import { API_BASE, request } from "./api.js";
 import useInterval from "./hooks/useInterval.js";
+import useEventSource from "./hooks/useEventSource.js";
 
 function App() {
   const [torrents, setTorrents] = useState([]);
@@ -57,6 +58,37 @@ function App() {
       refreshTorrents();
     }
   }, [refreshTorrents]);
+
+  // Centralized SSE subscription for the selected job - stays active regardless of view
+  useEventSource(`${API_BASE}/torrents/download/${selectedJobId}/progress`, {
+    enabled: Boolean(selectedJobId),
+    onMessage: (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        handleJobUpdate(payload);
+      } catch (err) {
+        pushAlert?.("Failed to parse progress event", "error");
+      }
+    }
+  });
+
+  // Fetch initial job status when a job is selected
+  useEffect(() => {
+    if (!selectedJobId) return;
+    let mounted = true;
+    request(`/torrents/download/${selectedJobId}/status`)
+      .then((data) => {
+        if (!mounted) return;
+        handleJobUpdate(data);
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        pushAlert(`Failed to load job status: ${err.message}`, "error");
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [selectedJobId, handleJobUpdate, pushAlert]);
 
   const selectedSnapshot = useMemo(() => (selectedJobId ? jobSnapshots[selectedJobId] : null), [jobSnapshots, selectedJobId]);
 
@@ -137,7 +169,14 @@ function App() {
       case "analyzer":
         return <TorrentAnalyzer onInfoReady={(info) => pushAlert(`Info hash ${info.infoHash}`, "success")} pushAlert={pushAlert} />;
       case "download":
-        return <DownloadManager onJobCreated={(jobId) => handleJobSelect(jobId)} pushAlert={pushAlert} />;
+        return (
+          <DownloadManager
+            onJobCreated={(jobId) => handleJobSelect(jobId)}
+            pushAlert={pushAlert}
+            activeJobId={selectedJobId}
+            jobSnapshot={selectedSnapshot}
+          />
+        );
       case "create":
         return <TorrentCreator pushAlert={pushAlert} />;
       case "transfers":
@@ -205,11 +244,10 @@ function App() {
       </main>
 
       <JobDetailDrawer
-        jobId={selectedJobId}
+        jobId={activeView !== "download" ? selectedJobId : null}
         snapshot={selectedSnapshot}
         onClose={() => setSelectedJobId(null)}
-        onJobUpdate={handleJobUpdate}
-        pushAlert={pushAlert}
+        onViewFullDetails={() => setActiveView("download")}
       />
       <AlertStack alerts={alerts} onDismiss={dismissAlert} />
       {addPeerModalInfoHash && (
