@@ -45,28 +45,28 @@ function TorrentAnalyzer({ onInfoReady, pushAlert }) {
       </form>
       {error && <p className="feedback error">{error}</p>}
       {metadata && (
-        <dl className="metrics-grid">
-          <div>
+        <dl className="metadata-list">
+          <div className="metadata-row">
             <dt>Name</dt>
             <dd>{metadata.name || "Unknown"}</dd>
           </div>
-          <div>
+          <div className="metadata-row">
             <dt>Tracker</dt>
-            <dd>{metadata.trackerUrl || metadata.announce || "n/a"}</dd>
+            <dd className="mono">{metadata.trackerUrl || metadata.announce || "n/a"}</dd>
           </div>
-          <div>
+          <div className="metadata-row">
             <dt>Info Hash</dt>
             <dd className="mono">{metadata.infoHash}</dd>
           </div>
-          <div>
+          <div className="metadata-row">
             <dt>Length</dt>
             <dd>{formatBytes(metadata.length)}</dd>
           </div>
-          <div>
+          <div className="metadata-row">
             <dt>Piece Length</dt>
             <dd>{formatBytes(metadata.pieceLength)}</dd>
           </div>
-          <div>
+          <div className="metadata-row">
             <dt>Pieces</dt>
             <dd>{metadata.pieceCount}</dd>
           </div>
