@@ -32,34 +32,6 @@ check_port() {
 # Get the project root directory (parent of scripts directory)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Function to check if a process is actually running
-is_process_running() {
-    local pid=$1
-    if [ -z "$pid" ]; then
-        return 1
-    fi
-    # Check if process exists and is running
-    if kill -0 "$pid" 2>/dev/null; then
-        return 0
-    fi
-    return 1
-}
-
-# Function to check if any process from PID file is running
-has_running_process() {
-    local pid_file=$1
-    if [ ! -f "$pid_file" ]; then
-        return 1
-    fi
-    # Check each PID in the file
-    while IFS= read -r pid; do
-        if is_process_running "$pid"; then
-            return 0
-        fi
-    done < "$pid_file"
-    return 1
-}
-
 # Function to find next available peer number
 find_next_peer() {
     local peer_num=1
@@ -68,30 +40,16 @@ find_next_peer() {
         local backend_port=$((BACKEND_BASE + peer_num - 1))
         local peer_port=$((PEER_BASE + peer_num - 1))
         
-        local port_in_use=false
-        local process_running=false
-        
         # Check if any of the ports are in use
         if check_port $frontend_port || check_port $backend_port || check_port $peer_port; then
-            port_in_use=true
-        fi
-        
-        # Check if PID file exists and has running processes
-        local pid_file="$SCRIPT_DIR/logs/peer-$peer_num.pids"
-        if [ -f "$pid_file" ]; then
-            if has_running_process "$pid_file"; then
-                process_running=true
-            else
-                # PID file exists but processes are dead - clean it up
-                rm -f "$pid_file" "$SCRIPT_DIR/logs/peer-$peer_num.info"
-            fi
-        fi
-        
-        # If ports are in use or processes are running, try next peer number
-        if [ "$port_in_use" = true ] || [ "$process_running" = true ]; then
             peer_num=$((peer_num + 1))
         else
-            break
+            # Also check if PID file exists (peer might be starting)
+            if [ -f "$SCRIPT_DIR/logs/peer-$peer_num.pids" ]; then
+                peer_num=$((peer_num + 1))
+            else
+                break
+            fi
         fi
     done
     echo $peer_num
@@ -198,4 +156,3 @@ echo -e "  Backend PID:  $BACKEND_PID"
 echo -e "  Logs: logs/peer-$PEER_NUM-*.log"
 echo -e ""
 echo -e "To stop this peer, run: ${YELLOW}./stop-peer.sh $PEER_NUM${NC}"
-
