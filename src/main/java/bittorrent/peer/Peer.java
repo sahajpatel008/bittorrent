@@ -122,6 +122,78 @@ public class Peer implements AutoCloseable {
 	public void markAllPiecesPresent() {
 		clientBitfield.set(0, torrentInfo.pieces().size());
 	}
+	
+	/**
+	 * Mark a specific piece as available in the bitfield.
+	 * Used when a piece becomes available during download.
+	 */
+	public void markPieceAvailable(int pieceIndex) {
+		clientBitfield.set(pieceIndex);
+	}
+	
+	/**
+	 * Initialize bitfield by checking which pieces are actually available in the file.
+	 * This allows serving pieces during an active download.
+	 */
+	public void initializeBitfieldFromFile() {
+		if (downloadedFile == null || !downloadedFile.exists()) {
+			return;
+		}
+		
+		try (RandomAccessFile raf = new RandomAccessFile(downloadedFile, "r")) {
+			long fileLength = raf.length();
+			long expectedLength = torrentInfo.length();
+			int pieceLength = torrentInfo.pieceLength();
+			int pieceCount = torrentInfo.pieces().size();
+			
+			// Check each piece to see if it's available
+			for (int pieceIndex = 0; pieceIndex < pieceCount; pieceIndex++) {
+				long pieceStart = (long) pieceIndex * pieceLength;
+				
+				// Check if piece position is within file bounds
+				if (pieceStart >= fileLength) {
+					continue; // Piece not written yet
+				}
+				
+				// Calculate actual piece size (last piece may be smaller)
+				long actualPieceSize = (pieceIndex == pieceCount - 1) 
+					? (expectedLength % pieceLength)
+					: pieceLength;
+				
+				// Check if we can read the full piece
+				if (pieceStart + actualPieceSize > fileLength) {
+					continue; // Piece not fully written yet
+				}
+				
+				// Try to read and verify the piece
+				try {
+					raf.seek(pieceStart);
+					byte[] pieceData = new byte[(int) actualPieceSize];
+					int bytesRead = raf.read(pieceData);
+					
+					if (bytesRead == actualPieceSize) {
+						// Verify piece hash
+						byte[] pieceHash = DigestUtils.sha1(pieceData);
+						byte[] expectedHash = torrentInfo.pieces().get(pieceIndex);
+						
+						if (Arrays.equals(pieceHash, expectedHash)) {
+							// Piece is valid, mark it as available
+							clientBitfield.set(pieceIndex);
+						}
+					}
+				} catch (IOException e) {
+					// Piece not available or corrupted, skip it
+					if (BitTorrentApplication.DEBUG) {
+						System.err.println("Could not verify piece " + pieceIndex + ": " + e.getMessage());
+					}
+				}
+			}
+		} catch (IOException e) {
+			if (BitTorrentApplication.DEBUG) {
+				System.err.println("Could not initialize bitfield from file: " + e.getMessage());
+			}
+		}
+	}
 
 	private Message doReceive(MessageSerialContext context) throws IOException {
 		final var dataInputStream = new DataInputStream(socket.getInputStream());
@@ -450,10 +522,47 @@ public class Peer implements AutoCloseable {
 		clientBitfield.set(pieceIndex);
 
 		// Send a HAVE message to this peer.
-		// This tells the peer you now have this piece and can upload it. 
+		// This tells the peer you now have this piece and can upload it.
+		// Also notify all other connected peers about this new piece
+		notifyAllPeersAboutNewPiece(pieceIndex); 
 		send(new Message.Have(pieceIndex));
 
 		return bytes;
+	}
+	
+	/**
+	 * Notify all connected peers (including incoming connections) about a newly available piece.
+	 * This allows serving peers to update their bitfields and serve the piece immediately.
+	 */
+	private void notifyAllPeersAboutNewPiece(int pieceIndex) {
+		try {
+			List<Peer> allConnections = PeerConnectionManager.getInstance().getConnections(infoHashHex);
+			for (Peer peer : allConnections) {
+				// Skip ourselves
+				if (peer == this) {
+					continue;
+				}
+				
+				// Update bitfield for incoming connections (serving peers)
+				// This allows them to serve the piece immediately
+				peer.markPieceAvailable(pieceIndex);
+				
+				// Send HAVE message to notify peer about new piece
+				try {
+					peer.send(new Message.Have(pieceIndex));
+				} catch (IOException e) {
+					// Peer connection might be closed, ignore
+					if (BitTorrentApplication.DEBUG) {
+						System.err.println("Failed to send HAVE to peer: " + e.getMessage());
+					}
+				}
+			}
+		} catch (Exception e) {
+			// Ignore errors in notification
+			if (BitTorrentApplication.DEBUG) {
+				System.err.println("Error notifying peers about new piece: " + e.getMessage());
+			}
+		}
 	}
 
 	public byte[] downloadFile(TorrentInfo torrentInfo) throws IOException, InterruptedException {
@@ -594,6 +703,9 @@ public class Peer implements AutoCloseable {
 		
 		// Unregister from SwarmManager
 		SwarmManager.getInstance().unregisterActivePeer(infoHashHex, remoteAddress);
+		
+		// Note: We keep upload stats even after peer disconnects for historical tracking
+		// Stats are only cleared when seeding stops (via SeedingStatsService.clearTorrentStats)
 		
 		// Stop threads
 		readerThread.interrupt();
@@ -959,6 +1071,20 @@ public class Peer implements AutoCloseable {
 			
 			// Send the requested piece
 			send(new Message.Piece(request.index(), request.begin(), block));
+			
+			// Track upload statistics for seeding torrents
+			try {
+				bittorrent.service.SeedingStatsService statsService = 
+					bittorrent.service.SeedingStatsService.getInstance();
+				statsService.recordBytesUploaded(infoHashHex, remoteAddress, request.length());
+				// Note: We track piece uploads per block, but could also track complete pieces
+				// For now, tracking bytes is sufficient
+			} catch (Exception e) {
+				// Don't fail upload if stats tracking fails
+				if (BitTorrentApplication.DEBUG) {
+					System.err.println("Failed to record upload stats: " + e.getMessage());
+				}
+			}
 			
 		} catch (FileNotFoundException e) {
 			// This will happen if we don't have the file/piece yet.

@@ -19,6 +19,7 @@ import bittorrent.util.DigestUtils;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import java.util.concurrent.TimeUnit;
 
 public class TrackerClient {
 
@@ -50,7 +51,13 @@ public class TrackerClient {
 		}
 	}
 
-	private final OkHttpClient client = new OkHttpClient();
+	// Configure OkHttpClient with short timeouts to prevent blocking when tracker is unavailable
+	// This ensures peer server runs independently of tracker availability
+	private final OkHttpClient client = new OkHttpClient.Builder()
+		.connectTimeout(2, TimeUnit.SECONDS)      // Connection timeout: 2 seconds
+		.readTimeout(3, TimeUnit.SECONDS)        // Read timeout: 3 seconds
+		.writeTimeout(2, TimeUnit.SECONDS)       // Write timeout: 2 seconds
+		.build();
 	private final String peerId;
 	private final short listenPort;
 
@@ -90,7 +97,13 @@ public class TrackerClient {
 	 */
 	@SuppressWarnings("unchecked")
 	public AnnounceResponse announce(Announceable announceable, int port, long left, Event event) throws IOException {
-		final var trackerUrl = announceable.getTrackerUrl();
+		String trackerUrl = announceable.getTrackerUrl();
+		
+		// Convert localhost to 127.0.0.1 to force IPv4 (avoid IPv6 resolution issues)
+		if (trackerUrl != null && trackerUrl.contains("localhost")) {
+			trackerUrl = trackerUrl.replace("localhost", "127.0.0.1");
+		}
+		
 		System.out.println("Attempting to pass tracker url : " + trackerUrl);
 
 		final var uri = URI.create(trackerUrl);
@@ -142,7 +155,11 @@ public class TrackerClient {
 	}
 
 	private AnnounceResponse announceUdp(Announceable announceable, URI uri, Event event) throws IOException {
-		final var host = uri.getHost();
+		String host = uri.getHost();
+		// Convert localhost to 127.0.0.1 to force IPv4 (avoid IPv6 resolution issues)
+		if (host != null && ("localhost".equalsIgnoreCase(host) || "::1".equals(host) || "0:0:0:0:0:0:0:1".equals(host))) {
+			host = "127.0.0.1";
+		}
 		final var port = uri.getPort() == -1 ? 80 : uri.getPort();
 		final var address = new InetSocketAddress(host, port);
 

@@ -9,3 +9,4 @@ bittorrent-frontend/node_modules
 react-frontend/node_modules
 reports/
 peer_data/
+tracker_data/

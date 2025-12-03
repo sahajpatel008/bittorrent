@@ -302,6 +302,21 @@ th {
   color: var(--danger);
 }
 
+.pill.trying_to_connect {
+  background: rgba(251, 191, 36, 0.25);
+  color: #f59e0b;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
 .pill.seeding {
   background: rgba(250, 204, 21, 0.25);
   color: #fde047;

@@ -17,7 +17,8 @@ public class DownloadJob {
         DOWNLOADING,
         COMPLETED,
         FAILED,
-        CANCELLED
+        CANCELLED,
+        TRYING_TO_CONNECT
     }
 
     private final String jobId;

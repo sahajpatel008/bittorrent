@@ -15,7 +15,8 @@ public class TrackerServerApplication {
         // Set default port to 8080 if not configured, or let properties handle it
         // We can pass different properties or profiles here.
         SpringApplication app = new SpringApplication(TrackerServerApplication.class);
-        // app.setDefaultProperties(Collections.singletonMap("server.port", "8080"));
+        // Set app.mode to tracker so tracker services are loaded
+        app.setDefaultProperties(java.util.Collections.singletonMap("app.mode", "tracker"));
         app.run(args);
     }
 }

@@ -314,8 +314,9 @@ public class PeerServer {
             SwarmManager.getInstance().registerActivePeer(infoHashHex, 
                 (java.net.InetSocketAddress) socket.getRemoteSocketAddress());
             
-            // Mark all pieces as present (we are a seeder for this torrent) and send our bitfield
-            peer.markAllPiecesPresent();
+            // Initialize bitfield from file (checks which pieces are actually available)
+            // This works for both complete files (seeding) and incomplete files (downloading)
+            peer.initializeBitfieldFromFile();
             peer.sendOurBitfield();
             
             // If extensions are supported, send extension handshake response

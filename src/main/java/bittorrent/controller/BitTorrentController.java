@@ -230,6 +230,30 @@ public class BitTorrentController {
 			.contentType(MediaType.APPLICATION_OCTET_STREAM)
 			.body(resource);
 	}
+	
+	/**
+	 * Retry a failed download job
+	 * POST /api/torrents/download/{jobId}/retry
+	 */
+	@PostMapping("/torrents/download/{jobId}/retry")
+	public ResponseEntity<Map<String, Object>> retryDownload(@PathVariable String jobId) {
+		try {
+			bitTorrentService.retryFailedDownload(jobId);
+			Map<String, Object> response = new HashMap<>();
+			response.put("jobId", jobId);
+			response.put("message", "Download retry initiated");
+			return ResponseEntity.ok(response);
+		} catch (IllegalArgumentException | IllegalStateException e) {
+			return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+				.body(Map.of("error", e.getMessage()));
+		} catch (IOException e) {
+			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+				.body(Map.of("error", "Failed to retry download: " + e.getMessage()));
+		} catch (Exception e) {
+			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+				.body(Map.of("error", "Unexpected error: " + e.getMessage()));
+		}
+	}
 
 	/**
 	 * Start seeding a torrent file
@@ -261,6 +285,7 @@ public class BitTorrentController {
 			java.nio.file.Files.copy(tempDataFile.toPath(), permanentDataFile.toPath(), 
 				java.nio.file.StandardCopyOption.REPLACE_EXISTING);
 			
+			// Seed the torrent (independent of tracker - will announce when tracker is available)
 			bitTorrentService.seed(tempTorrentFile.getAbsolutePath(), permanentDataFile.getAbsolutePath());
 			
 			tempTorrentFile.delete();
@@ -270,7 +295,8 @@ public class BitTorrentController {
 			response.put("status", "seeding");
 			response.put("infoHash", infoHash);
 			response.put("filePath", permanentDataFile.getAbsolutePath());
-			response.put("message", "Torrent is now being seeded");
+			response.put("message", "Torrent is now being seeded. Seeding is active and independent of tracker. " +
+				"Tracker will be notified via periodic re-announcements (every 15 seconds) when available.");
 			
 			return ResponseEntity.ok(response);
 		} catch (Exception e) {
@@ -292,15 +318,54 @@ public class BitTorrentController {
 			Map<String, Object> torrentInfo = new HashMap<>();
 			torrentInfo.put("infoHash", job.getInfoHashHex());
 			torrentInfo.put("fileName", job.getFileName());
-			torrentInfo.put("status", job.getStatus().name());
+			
+			// Determine status: if download is 100% complete and file exists, mark as SEEDING
+			// (since completed downloads automatically start seeding)
+			// even if status is FAILED (e.g., due to tracker announce failure)
+			String status = job.getStatus().name();
+			File downloadedFile = job.getDownloadedFile();
+			if (job.getProgress() >= 100.0 && job.getCompletedPieces() == job.getTotalPieces() 
+					&& downloadedFile != null && downloadedFile.exists()) {
+				// Download actually completed successfully - check if it's registered for seeding
+				boolean isSeeding = peerServer.isTorrentActive(job.getInfoHashHex());
+				if (isSeeding) {
+				// Completed download is actively seeding
+				status = "SEEDING";
+				torrentInfo.put("type", "seeding");
+				// Add upload statistics summary for seeding torrents
+				var statsService = bittorrent.service.SeedingStatsService.getInstance();
+				var peerStats = statsService.getTorrentPeerStats(job.getInfoHashHex());
+				long totalBytesUploaded = peerStats.stream()
+					.mapToLong(bittorrent.service.PeerStats::getBytesUploaded)
+					.sum();
+				long totalPiecesUploaded = peerStats.stream()
+					.mapToLong(bittorrent.service.PeerStats::getPiecesUploaded)
+					.sum();
+				double overallUploadSpeed = peerStats.stream()
+					.mapToDouble(bittorrent.service.PeerStats::getUploadSpeed)
+					.sum();
+				torrentInfo.put("bytesUploaded", totalBytesUploaded);
+				torrentInfo.put("piecesUploaded", totalPiecesUploaded);
+				torrentInfo.put("uploadSpeed", overallUploadSpeed);
+				torrentInfo.put("connectedPeers", peerStats.size());
+				} else {
+					// Completed but not yet registered for seeding (shouldn't happen, but handle gracefully)
+					if (status.equals("FAILED") || status.equals("TRYING_TO_CONNECT")) {
+						status = "COMPLETED";
+						job.setStatus(DownloadJob.Status.COMPLETED);
+					}
+					torrentInfo.put("type", "downloading");
+				}
+			} else {
+				torrentInfo.put("type", "downloading");
+			}
+			torrentInfo.put("status", status);
 			torrentInfo.put("progress", job.getProgress());
 			torrentInfo.put("completedPieces", job.getCompletedPieces());
 			torrentInfo.put("totalPieces", job.getTotalPieces());
 			torrentInfo.put("jobId", job.getJobId());
 			torrentInfo.put("downloadSpeed", job.getOverallDownloadSpeed());
-			torrentInfo.put("type", "downloading");
 			// Add download path
-			File downloadedFile = job.getDownloadedFile();
 			if (downloadedFile != null) {
 				torrentInfo.put("downloadPath", downloadedFile.getAbsolutePath());
 			} else {
@@ -341,6 +406,24 @@ public class BitTorrentController {
 					torrentInfo.put("status", "SEEDING_MISSING_FILE");
 					torrentInfo.put("error", "Seeding file not registered");
 				}
+				
+				// Add upload statistics summary
+				var statsService = bittorrent.service.SeedingStatsService.getInstance();
+				var peerStats = statsService.getTorrentPeerStats(infoHash);
+				long totalBytesUploaded = peerStats.stream()
+					.mapToLong(bittorrent.service.PeerStats::getBytesUploaded)
+					.sum();
+				long totalPiecesUploaded = peerStats.stream()
+					.mapToLong(bittorrent.service.PeerStats::getPiecesUploaded)
+					.sum();
+				double overallUploadSpeed = peerStats.stream()
+					.mapToDouble(bittorrent.service.PeerStats::getUploadSpeed)
+					.sum();
+				torrentInfo.put("bytesUploaded", totalBytesUploaded);
+				torrentInfo.put("piecesUploaded", totalPiecesUploaded);
+				torrentInfo.put("uploadSpeed", overallUploadSpeed);
+				torrentInfo.put("connectedPeers", peerStats.size());
+				
 				torrents.add(torrentInfo);
 			}
 		}
@@ -402,6 +485,49 @@ public class BitTorrentController {
 				.body(Map.of("error", "Failed to get peers: " + e.getMessage()));
 		}
 	}
+	
+	/**
+	 * Get upload statistics for a seeding torrent
+	 * GET /api/torrents/{infoHash}/upload-stats
+	 */
+	@GetMapping("/torrents/{infoHash}/upload-stats")
+	public ResponseEntity<Map<String, Object>> getSeedingUploadStats(@PathVariable String infoHash) {
+		try {
+			var statsService = bittorrent.service.SeedingStatsService.getInstance();
+			var peerStats = statsService.getTorrentPeerStats(infoHash);
+			
+			List<Map<String, Object>> peerList = new ArrayList<>();
+			long totalBytesUploaded = 0;
+			long totalPiecesUploaded = 0;
+			
+			for (bittorrent.service.PeerStats stats : peerStats) {
+				Map<String, Object> peerInfo = new HashMap<>();
+				peerInfo.put("address", stats.getAddress().toString());
+				peerInfo.put("ip", stats.getAddress().getAddress().getHostAddress());
+				peerInfo.put("port", stats.getAddress().getPort());
+				peerInfo.put("bytesUploaded", stats.getBytesUploaded());
+				peerInfo.put("piecesUploaded", stats.getPiecesUploaded());
+				peerInfo.put("uploadSpeed", stats.getUploadSpeed());
+				peerInfo.put("connectionDuration", stats.getConnectionDuration());
+				peerList.add(peerInfo);
+				
+				totalBytesUploaded += stats.getBytesUploaded();
+				totalPiecesUploaded += stats.getPiecesUploaded();
+			}
+			
+			Map<String, Object> response = new HashMap<>();
+			response.put("infoHash", infoHash);
+			response.put("peers", peerList);
+			response.put("count", peerList.size());
+			response.put("totalBytesUploaded", totalBytesUploaded);
+			response.put("totalPiecesUploaded", totalPiecesUploaded);
+			
+			return ResponseEntity.ok(response);
+		} catch (Exception e) {
+			return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+				.body(Map.of("error", "Failed to get upload stats: " + e.getMessage()));
+		}
+	}
 
 	/**
 	 * Stop seeding a torrent (remove from active torrents)
@@ -453,10 +579,42 @@ public class BitTorrentController {
 			var swarmManager = SwarmManager.getInstance();
 			swarmManager.addPeerManually(infoHash, address);
 			
+			// Try to immediately connect to this peer for active DOWNLOADING jobs
+			bitTorrentService.tryConnectNewPeerForActiveDownloads(infoHash, address);
+			
+			// Check if there are any failed or trying-to-connect downloads for this torrent and auto-retry them
+			int retriedCount = 0;
+			for (DownloadJob job : bitTorrentService.getAllActiveJobs()) {
+				if (job.getInfoHashHex().equals(infoHash) && 
+					(job.getStatus() == DownloadJob.Status.FAILED ||
+					 job.getStatus() == DownloadJob.Status.TRYING_TO_CONNECT)) {
+					try {
+						bitTorrentService.retryFailedDownload(job.getJobId());
+						retriedCount++;
+						System.out.println("Automatically retrying failed download: " + job.getJobId() + 
+							" after peer " + ip + ":" + port + " was added");
+					} catch (Exception e) {
+						System.err.println("Failed to auto-retry download " + job.getJobId() + 
+							": " + e.getMessage());
+					}
+				}
+			}
+			
 			Map<String, Object> response = new HashMap<>();
 			response.put("infoHash", infoHash);
 			response.put("peer", Map.of("ip", ip, "port", port));
-			response.put("message", "Peer added successfully. Use this when tracker is unavailable to bootstrap.");
+			String message = "Peer added successfully. Use this when tracker is unavailable to bootstrap.";
+			if (retriedCount > 0) {
+				message += " Automatically retried " + retriedCount + " failed download(s).";
+			}
+			// Check if there are active downloads
+			boolean hasActiveDownloads = bitTorrentService.getAllActiveJobs().stream()
+				.anyMatch(job -> job.getInfoHashHex().equals(infoHash) && 
+					job.getStatus() == DownloadJob.Status.DOWNLOADING);
+			if (hasActiveDownloads) {
+				message += " Attempting to connect to peer for active download(s).";
+			}
+			response.put("message", message);
 			
 			return ResponseEntity.ok(response);
 		} catch (Exception e) {
