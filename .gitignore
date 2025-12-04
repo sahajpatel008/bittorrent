@@ -10,3 +10,7 @@ react-frontend/node_modules
 reports/
 peer_data/
 tracker_data/
+.vscode/
+.settings/
+.project
+.idea/
